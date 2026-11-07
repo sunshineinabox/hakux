@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### What's new
+
+- **XBE patches through RetroArch's cheats** (#167) — A `.cht` entry whose
+  code is `xbe-patch-v1 CRC32:SIZE+OFFSET:BYTES...` patches the game's disc
+  XBE at its next boot when the CRC-32 and size match, such as a widescreen
+  hack. Load it under **Quick Menu → Cheats**, enable it, apply, and restart.
+  `tools/mods/xbe-to-cht.py` converts IPS and BPS patches (with Floating IPS)
+  or a patched XBE.
+
 ## linux-v0.20.0 (Linux, aarch64 and x86-64, and Android)
 
 ### What's new

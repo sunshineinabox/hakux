@@ -334,7 +334,7 @@ Home + Start stays PortareOS's; the core adds no exit chord.
 | `retro_unload_game` | stop, join, destroy; a later load works |
 | `retro_deinit` | release the rest; `dlclose` is safe |
 | serialization | size 0, false, until section 11 passes |
-| `retro_cheat_set`, `retro_cheat_reset` | the codes of `mods/README.md`'s cheats, or `AAAAAAAA VVVVVVVV`, joined by `+`, blanks or newlines; a set apart from the mods' cheats, from the next vblank, also before the guest boots; kept over a reset or relaunch, cleared on unload; a code the core can't read is logged once and stays off |
+| `retro_cheat_set`, `retro_cheat_reset` | the codes of `mods/README.md`'s cheats, or `AAAAAAAA VVVVVVVV`, joined by `+`, blanks or newlines; a set apart from the mods' cheats, from the next vblank, also before the guest boots; kept over a reset or relaunch, cleared on unload; a code the core can't read is logged once and stays off; an `xbe-patch-v1` code is an XBE patch instead (`native/core/xbe_patch.h`, `native/README.linux.md`): applied at the next boot to the disc XBE whose CRC-32 and size it names, all its runs or none, none when two match; a change shows a reminder to restart |
 | memory, special content | unsupported |
 
 Run-ahead stays off for hakuX, now and after section 11:

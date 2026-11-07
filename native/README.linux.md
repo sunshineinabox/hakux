@@ -148,6 +148,43 @@ A. Cheats apply from the next frame, also when applied before the game has
 started, and stay through a reset. A code the core can't read is logged once
 and that cheat stays off.
 
+XBE patches, such as widescreen hacks, use the same menu. An emulator-handled
+entry whose code starts with `xbe-patch-v1` changes bytes of the game's XBE
+when it boots:
+
+```ini
+cheats = 1
+cheat0_desc = "Widescreen (16:9) [restart]"
+cheat0_handler = 0
+cheat0_code = "xbe-patch-v1 DF0DB6D8:00157000+0004E163:70+0004E18E:70"
+cheat0_enable = false
+```
+
+After the tag come the stock XBE's CRC-32 and size (`CRC32:SIZE`), then one
+`+OFFSET:BYTES` per run: a file offset of 4 or more and 1–64 bytes as hex
+pairs. CRC, size and offsets are eight hex digits. An entry holds up to 128
+runs, sorted and not overlapping. The patch applies to the disc XBE the core
+boots (`default.xbe`, or the one a game relaunches into) only if its size and
+CRC match, with all runs or none, including sections the game loads later. If
+two enabled patches match the same XBE, neither applies. Mismatches and
+rejected codes are logged, and the XBE boots unpatched. An ISO and a CHD with
+the same XBE take the same patch. Memory cheats work alongside.
+
+To use one, load the `.cht` under **Quick Menu → Cheats**, enable the entry,
+choose **Apply Changes**, then **Quick Menu → Restart**; the core shows a
+reminder when the enabled patches differ from the running game's. For a
+widescreen patch, set **Screen Format** to **Widescreen** and RetroArch's
+aspect ratio to **Core provided**. Disable the entry and restart to return to
+the original XBE.
+
+`tools/mods/xbe-to-cht.py` writes the `.cht` from the stock XBE and either an
+IPS or BPS patch (applied with Floating IPS, `flips`) or the patched XBE; all
+three give the same file for the same edits:
+
+```sh
+python3 tools/mods/xbe-to-cht.py stock.xbe widescreen.ips > "Game (USA).cht"
+```
+
 Core options (`native/libretro/options.c`) apply on the next game start,
 except Crop Overscan, Rumble and Frame Pacing, which update immediately:
 
