@@ -2,8 +2,8 @@
 /*
  * hakuX native core — UPnP port forwarding for NAT (nat.c).
  *
- * The host must request the forward: libslirp's guest address, 10.0.2.15,
- * is not reachable on the router's LAN.
+ * The host must request the forward: the console's address on libslirp's
+ * network (10.0.2.16-215, from its MAC) is not reachable on the router's LAN.
  *
  * A worker discovers an IGD through SSDP multicast (239.255.255.250:1900)
  * or the upnp= endpoint, then finds its WANIPConnection or WANPPPConnection

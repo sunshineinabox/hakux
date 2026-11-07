@@ -156,14 +156,21 @@ bool nc_net_nat_address(const uint8_t mac[6])
     return mac[0] == 0x52 && mac[1] == 0x55;   /* libslirp's: 52:55 and the address */
 }
 
-/* The stack, for the console with this MAC (its frames' source). */
-static bool nat_start(const uint8_t mac[6])
+/* The DNS server DHCP gives the console: dns=, or Insignia's. */
+static struct in_addr nat_dns(const NcNetConfig *c)
 {
-    const NcNetConfig *c = nc_net_config();
     struct in_addr dns = { .s_addr = c->dns[0] };
     if (!dns.s_addr) {
         inet_pton(AF_INET, INSIGNIA_DNS, &dns);
     }
+    return dns;
+}
+
+/* The stack, for the console with this MAC (its frames' source). */
+static bool nat_start(const uint8_t mac[6])
+{
+    const NcNetConfig *c = nc_net_config();
+    const struct in_addr dns = nat_dns(c);
     SlirpConfig cfg = {
         .version = 4,
         .in_enabled = true,
@@ -195,7 +202,12 @@ static bool nat_start(const uint8_t mac[6])
 
 static bool nat_init(void)
 {
-    return true;                        /* the stack starts with the console's first frame */
+    /* the stack starts with the console's first frame, which carries its MAC */
+    const struct in_addr dns = nat_dns(nc_net_config());
+    char b[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &dns, b, sizeof(b));
+    nc_log("hakuX-native-net", "nat: DNS %s, the stack starts with the console's first frame", b);
+    return true;
 }
 
 static void nat_input(const uint8_t *frame, size_t len)

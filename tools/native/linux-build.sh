@@ -13,7 +13,7 @@ cmake -S native -B "$build" -G Ninja \
     -DHAKUX_FEX_DIR="$deps/fex" -DNC_DEPS="$deps" \
     -DHAKUX_BUILD_LIBRETRO=ON -DHAKUX_VERSION="${HAKUX_VERSION:-dev}" \
     -DHAKUX_LR_END_PROCESS=ON "$@"
-cmake --build "$build" --target xboxrun hakux_libretro libretro-harness linux-smoke audio-smoke apu-stereo-smoke apu-resample-smoke apu-adpcm-test apu-reinit-smoke rumble-smoke voice-smoke usb-smoke nat-smoke xdvdfs-test xc-test \
+cmake --build "$build" --target xboxrun hakux_libretro libretro-harness linux-smoke audio-smoke apu-stereo-smoke apu-resample-smoke apu-adpcm-test apu-reinit-smoke rumble-smoke voice-smoke usb-smoke nat-smoke lan-smoke xdvdfs-test xc-test \
     vulkan-probe kms-grab -j "${JOBS:-4}"
 if grep -q '^HAKUX_DSP_JIT:BOOL=ON$' "$build/CMakeCache.txt"; then
     cmake --build "$build" --target apu-jit-smoke -j "${JOBS:-4}"

@@ -58,7 +58,7 @@ static struct {
     Station st[MACS];
     time_t hello;                       /* the last hello sent */
     uint64_t flooded, unicast, dropped_own, dropped_dup;
-    struct { uint64_t hash, ms; } dup[DUPS];   /* frames received lately */
+    struct { uint64_t hash, ms; uint32_t ip; uint16_t port; } dup[DUPS];   /* frames received lately */
     unsigned dup_next;
 } g_lan = { .fd = -1 };
 
@@ -69,8 +69,10 @@ static uint64_t now_ms(void)
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
-/* Whether this frame came in already, within DUP_MS (over the other network). */
-static bool duplicate(const uint8_t *frame, size_t len)
+/* Whether this frame came in already, within DUP_MS, from another address:
+ * the same console over its other network. A frame repeated from the same
+ * address is the console's own repeat, and goes through. */
+static bool duplicate(const uint8_t *frame, size_t len, const struct sockaddr_in *from)
 {
     uint64_t h = 1469598103934665603ull;    /* FNV-1a */
     for (size_t i = 0; i < len; i++) {
@@ -78,11 +80,12 @@ static bool duplicate(const uint8_t *frame, size_t len)
     }
     const uint64_t now = now_ms();
     for (unsigned i = 0; i < DUPS; i++) {
-        if (g_lan.dup[i].hash == h && now - g_lan.dup[i].ms < DUP_MS) {
+        if (g_lan.dup[i].hash == h && now - g_lan.dup[i].ms < DUP_MS &&
+            (g_lan.dup[i].ip != from->sin_addr.s_addr || g_lan.dup[i].port != from->sin_port)) {
             return true;
         }
     }
-    g_lan.dup[g_lan.dup_next] = (typeof(g_lan.dup[0])){ h, now };
+    g_lan.dup[g_lan.dup_next] = (typeof(g_lan.dup[0])){ h, now, from->sin_addr.s_addr, from->sin_port };
     g_lan.dup_next = (g_lan.dup_next + 1) % DUPS;
     return false;
 }
@@ -352,7 +355,7 @@ static void lan_poll(struct pollfd *fds, int n)
             twin(&from);
             continue;
         }
-        if (duplicate(buf, (size_t)r)) {
+        if (duplicate(buf, (size_t)r, &from)) {
             g_lan.dropped_dup++;
             continue;
         }

@@ -155,7 +155,7 @@ except Crop Overscan, Rumble and Frame Pacing, which update immediately:
 | `hakux_language` | `auto` (RetroArch's), `english`, `japanese`, `german`, `french`, `spanish`, `italian`, `korean`, `chinese`, `portuguese` | `auto` |
 | `hakux_video_region` | `auto` (the game's region), `ntsc-m`, `ntsc-j`, `pal` | `auto` |
 | `hakux_rumble` | `disabled`, `enabled` (controller vibration) | `disabled` |
-| `hakux_network` | `disabled` (no cable), `lan` (system link), `insignia` (Xbox Live through Insignia via NAT) | `disabled` |
+| `hakux_network` | `disabled` (no cable), `lan` (system link), `insignia` (Xbox Live through Insignia via NAT), `all` (both at once) | `disabled` |
 | `hakux_communicator` | `disabled`, `enabled` (an Xbox Live Communicator in player 1's controller; experimental) | `disabled` |
 | `hakux_mic_sensitivity` | `medium`, `low`, `high`, `off` (the Communicator's noise gate: -38, -30 or -46 dBFS, or none) | `medium` |
 | `hakux_audio_resampler` | `sinc` (higher quality, 32-tap filter; NEON on ARM64, AVX2+FMA or SSE2 on x86-64), `linear` (less CPU, softer high frequencies) | `sinc` |
@@ -187,7 +187,7 @@ output, 3 dB down in each channel. Voice with another player is untested.
 microphone's first 60 seconds as raw 16-bit mono.
 
 Insignia mode uses upstream's NAT backend (`native/net/nat.c`, libslirp).
-The console gets 10.0.2.15 via DHCP and uses Insignia's DNS server,
+The console gets an address from its MAC (10.0.2.16-215) via DHCP and uses Insignia's DNS server,
 46.101.64.175. If your provider blocks that server, put an insigniaDNS
 server's address in `insignia-dns.txt` in the save directory, using the same
 format as `lan-peers.txt`. Only the first address is used. To boot the Xbox

@@ -247,6 +247,9 @@ close and reopen the game.
   [NAT / port forwarding guide](native/README.linux.md#insignia-nat).
   Dashboard navigation and the complete Insignia setup process have not
   yet been tested on a device.
+- **Xbox Live and system link:** both at once, as on a real console's home
+  network. Each console gets its own address, so consoles on one network
+  can play system link while signed in to Insignia.
 
 XLink Kai is unavailable in RetroArch.
 

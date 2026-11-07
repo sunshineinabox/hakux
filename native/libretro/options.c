@@ -80,10 +80,11 @@ static struct retro_core_option_v2_definition g_defs[OPT_COUNT + 1] = {
         "For peers on another subnet or a VPN, add their addresses to lan-peers.txt in the save directory. "
         "Xbox Live (Insignia) connects to Insignia, the Xbox Live revival, through the Internet; register the "
         "console with Insignia's Setup Assistant first. If your provider blocks Insignia's DNS server, put the "
-        "address of an insigniaDNS server in insignia-dns.txt in the save directory." NEXT,
+        "address of an insigniaDNS server in insignia-dns.txt in the save directory. "
+        "Xbox Live and system link is both at once, as on a real console's home network." NEXT,
         NULL, NULL,
         {{"disabled", "Off (no cable)"}, {"lan", "LAN (system link)"}, {"insignia", "Xbox Live (Insignia)"},
-         {NULL, NULL}},
+         {"all", "Xbox Live and system link"}, {NULL, NULL}},
         "disabled"},
     [OPT_COMMUNICATOR] = {
         "hakux_communicator", "Xbox Live Communicator", NULL,

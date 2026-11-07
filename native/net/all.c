@@ -21,7 +21,21 @@ static int g_nat_fds;                   /* this round's: the NAT's first, then t
 
 static bool all_init(void)
 {
-    return nc_net_nat.init() && nc_net_lan.init();
+    if (!nc_net_nat.init()) {
+        return false;
+    }
+    if (!nc_net_lan.init()) {
+        nc_net_nat.close();
+        return false;
+    }
+    return true;
+}
+
+/* Both, as the stop closes only the backend it started (net.c). */
+static void all_close(void)
+{
+    nc_net_nat.close();
+    nc_net_lan.close();
 }
 
 static void all_input(const uint8_t *frame, size_t len)
@@ -60,4 +74,5 @@ const NcNetBackend nc_net_all = {
     .input = all_input,
     .fill = all_fill,
     .poll = all_poll,
+    .close = all_close,
 };

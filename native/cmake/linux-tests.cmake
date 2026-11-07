@@ -65,6 +65,11 @@ add_executable(nat-smoke "${NC_REPO}/tests/native/linux/nat.c")
 target_link_libraries(nat-smoke PRIVATE hakux_native Threads::Threads)
 add_test(NAME nat-smoke COMMAND nat-smoke)
 set_tests_properties(nat-smoke PROPERTIES TIMEOUT 60)
+# LAN duplicate filtering and combined-backend cleanup.
+add_executable(lan-smoke "${NC_REPO}/tests/native/linux/lan.c")
+target_link_libraries(lan-smoke PRIVATE hakux_native Threads::Threads)
+add_test(NAME lan-smoke COMMAND lan-smoke)
+set_tests_properties(lan-smoke PROPERTIES TIMEOUT 30)
 # The USB stack driven as the guest's would: enumeration, input, rumble, and
 # controllers plugged in and pulled out.
 add_executable(usb-smoke "${NC_REPO}/tests/native/usb/usb_test.c" "${NC_REPO}/native/dev/usb.c"

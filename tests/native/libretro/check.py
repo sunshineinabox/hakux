@@ -364,7 +364,8 @@ def main():
         for network, marker in (
                 ('net=lan lanport=43075 lanbcast=127.0.0.1', 'lan: started'),
                 ('net=kai kai=127.0.0.1:43076', 'kai: started'),
-                (f'net=nat {NAT_TEST}', 'nat: UDP 43080 forwarded')):
+                (f'net=nat {NAT_TEST}', 'nat: DNS 46.101.64.175'),
+                (f'net=all lanport=43078 lanbcast=127.0.0.1 {NAT_TEST}', 'all: started')):
             cycles([args.harness, args.core, root / 'spin.iso', 30, root / 'saves'],
                    dict(os.environ, NC_NET=network), 5, marker)
         # a backend that fails to start (LAN's port taken, without
@@ -391,17 +392,24 @@ def main():
         # Xbox Live (Insignia): NAT with Insignia's DNS server, or the first
         # address insignia-dns.txt in the save directory names (an
         # insigniaDNS server; NAT gives the console one), never a word that
-        # isn't one
+        # isn't one. The stack itself, and its port forward, start with the
+        # console's first frame, which spin.iso never sends (nat-smoke does).
         insignia = dict(os.environ, HARNESS_OPTIONS='hakux_network=insignia', NC_NET=NAT_TEST)
         run([args.harness, args.core, root / 'spin.iso', 30, root / 'saves'], 0,
             ('network insignia', 'Xbox Live through Insignia (NAT), DNS 46.101.64.175',
-             'nat: libslirp 4.7.0, 10.0.2.0/24, DNS 46.101.64.175', "nat: UDP 43080 forwarded to the console's 3074",
-             'nat: started', 'ran 30 frames'),
+             "nat: DNS 46.101.64.175, the stack starts with the console's first frame", 'nat: started',
+             'ran 30 frames'),
             insignia)
+        # Xbox Live and system link at once: the NAT and the LAN behind one
+        # switch (native/net/all.c)
+        run([args.harness, args.core, root / 'spin.iso', 30, root / 'saves'], 0,
+            ('network all', 'Xbox Live through Insignia (NAT) and system link, DNS 46.101.64.175',
+             'nat: DNS 46.101.64.175', 'lan: UDP port 3075', 'all: started', 'ran 30 frames'),
+            dict(insignia, HARNESS_OPTIONS='hakux_network=all'))
         dns = root / 'saves' / 'insignia-dns.txt'
         dns.write_text('# insigniaDNS at home\n192.168.1.20, 192.168.1.21\n192.168.1.22\n')
         run([args.harness, args.core, root / 'spin.iso', 30, root / 'saves'], 0,
-            ('DNS 192.168.1.20 (insignia-dns.txt)', 'nat: libslirp 4.7.0, 10.0.2.0/24, DNS 192.168.1.20',
+            ('DNS 192.168.1.20 (insignia-dns.txt)', 'nat: DNS 192.168.1.20',
              'nat: started', 'ran 30 frames'),
             insignia)
         dns.write_text('insignia.example\n')

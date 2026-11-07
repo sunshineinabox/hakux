@@ -80,13 +80,8 @@ void nc_lr_options_declare(retro_environment_t env);
 void nc_lr_options_apply(void);
 void nc_lr_options_run(void);
 
-/* net.c — apply the Network option before boot (options.c): "disabled"
- * (off), "lan" (local broadcasts and peers in lan-peers.txt) or "insignia"
- * (NAT with Insignia's DNS server or the first address in insignia-dns.txt).
- * Log Insignia accounts; if none exist, tell game users where to create one.
- * Warn dashboard users when Xbox Live needs "insignia" enabled. On a
- * duplicate console identity, warn and request a new identity for the next
- * game start (retro_run). */
+/* Select off, LAN, Insignia NAT or both before boot. Warn about missing
+ * Insignia accounts and duplicate console identities during play. */
 void nc_lr_net_apply(const char *mode);
 void nc_lr_net_run(void);
 
