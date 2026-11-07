@@ -385,6 +385,11 @@ def main():
                    {'XBE patches changed since the boot': 1, 'XBE patch (cheat 1)': 1, 'guest executed HLT': 1},
                    dict(vk, HARNESS_CHEATS=f'{poke}|{patch()}', HARNESS_CHEATS_AT='10', HARNESS_CHEATS_LATE='1',
                         HARNESS_RESET_AT='20'))
+        # on, off (the set the game booted with: nothing to tell), on again:
+        # told each time it differs
+        run_counts(xp60, {'XBE patches changed since the boot': 2, 'frame 15: cheats off': 1},
+                   dict(vk, HARNESS_CHEATS=patch(), HARNESS_CHEATS_AT='10,20', HARNESS_CHEATS_LATE='1',
+                        HARNESS_CHEATS_OFF_AT='15'))
         # M2: the core stops in the process and boots again: 100 games and 20
         # from a CHD, a CPU in a loop that never enters the kernel, the
         # renderer on a device of its own and on the frontend's, a reset, a

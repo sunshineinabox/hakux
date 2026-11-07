@@ -42,7 +42,9 @@
  * applies them (retro_cheat_reset, then each one on) after retro_load_game,
  * before the video driver starts; HARNESS_CHEATS_AT=N again before the Nth
  * retro_run, as a cheat toggled in RetroArch's menu does (HARNESS_CHEATS_LATE=1:
- * only then, as a .cht loaded from the menu while the game runs).
+ * only then, as a .cht loaded from the menu while the game runs); N may be
+ * a list (10,20). HARNESS_CHEATS_OFF_AT=N: all off then (retro_cheat_reset,
+ * as RetroArch with every cheat off).
  * HARNESS_CYCLES=N: the game loaded, run and unloaded N times, the core
  * closed and opened again between, as RetroArch does between games; after
  * each, the core closed, the threads, descriptors, memory and signal
@@ -527,11 +529,17 @@ static int play(const struct retro_game_info *game, long frames)
     long ran = 0;
     const long reset_at = getenv("HARNESS_RESET_AT") ? atol(getenv("HARNESS_RESET_AT")) : -1;
     const long reinit_at = getenv("HARNESS_REINIT_AT") ? atol(getenv("HARNESS_REINIT_AT")) : -1;
-    const long cheats_at = getenv("HARNESS_CHEATS_AT") ? atol(getenv("HARNESS_CHEATS_AT")) : -1;
+    const long cheats_off_at = getenv("HARNESS_CHEATS_OFF_AT") ? atol(getenv("HARNESS_CHEATS_OFF_AT")) : -1;
     for (; ran < frames && !g_shutdown; ran++) {
-        if (ran == cheats_at) {
-            printf("frame %ld: ", ran);
-            apply_cheats();
+        for (const char *p = getenv("HARNESS_CHEATS_AT"); p && *p; p = strchr(p, ',') ? strchr(p, ',') + 1 : "") {
+            if (atol(p) == ran) {
+                printf("frame %ld: ", ran);
+                apply_cheats();
+            }
+        }
+        if (ran == cheats_off_at) {
+            printf("frame %ld: cheats off\n", ran);
+            p_retro_cheat_reset();
         }
         for (const char *p = getenv("HARNESS_PORTS_AT"); p && *p; p = strchr(p, ';') ? strchr(p, ';') + 1 : "") {
             char *end;

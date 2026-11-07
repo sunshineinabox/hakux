@@ -898,11 +898,14 @@ static bool cheat_told(const char *code)
     return false;
 }
 
+static uint64_t g_xbe_told = UINT64_MAX;      /* the patch set told about (none: 0 is the empty set's) */
+
 static void cheats_forget(void)
 {
     nc_cheat_front_reset();
     nc_xbe_patch_front_reset();
     g_ncheat_bad = 0;
+    g_xbe_told = UINT64_MAX;
 }
 
 RETRO_API void retro_cheat_reset(void)
@@ -934,16 +937,18 @@ RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char *code)
 }
 
 /* The XBE patches changed since the boot: told once a change, as they
- * take a restart */
+ * take a restart; back to the booted set, a change is told again */
 static void xbe_patches_changed(void)
 {
-    static uint64_t told = UINT64_MAX;          /* none yet (0 is the empty set's) */
     const uint64_t now = nc_xbe_patch_front_hash();
-    if (now == nc_mods_xbe_patches_booted() || now == told ||
-        __atomic_load_n(&g_core_state, __ATOMIC_ACQUIRE) != 2) {
+    if (now == nc_mods_xbe_patches_booted()) {
+        g_xbe_told = UINT64_MAX;
         return;
     }
-    told = now;
+    if (now == g_xbe_told || __atomic_load_n(&g_core_state, __ATOMIC_ACQUIRE) != 2) {
+        return;
+    }
+    g_xbe_told = now;
     message("XBE patches changed: restart the game (Quick Menu, Restart) to apply them", 360);
     nc_log("hakuX-libretro", "XBE patches changed since the boot: they apply at the next restart");
 }
