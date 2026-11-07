@@ -445,6 +445,24 @@ bool nc_disc_overlay_patch(NcDisc *d, const char *path, uint64_t off, const uint
     return true;
 }
 
+bool nc_disc_overlay_patch_all(NcDisc *d, const char *path, const NcDiscRun *runs, unsigned n)
+{
+    NcDiscOverlay *o = ov_of(d);
+    if (!o) {
+        return false;
+    }
+    const unsigned before = o->np;
+    for (unsigned i = 0; i < n; i++) {
+        if (!nc_disc_overlay_patch(d, path, runs[i].off, runs[i].bytes, runs[i].len)) {
+            while (o->np > before) {
+                free(o->p[--o->np].bytes);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 void nc_disc_overlay_list(const NcDisc *d, const char *dir,
                           void (*fn)(void *ctx, const char *name, uint32_t size, bool is_dir), void *ctx)
 {

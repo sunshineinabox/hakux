@@ -141,6 +141,6 @@ if(TARGET hakux_libretro)
              COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tests/native/libretro/check.py"
                      "$<TARGET_FILE:libretro-harness>" "$<TARGET_FILE:hakux_libretro>"
                      --audio-default "$<IF:$<BOOL:${HAKUX_DSP_JIT}>,dsp,fast>")
-    set_tests_properties(libretro-smoke PROPERTIES TIMEOUT 120)
+    set_tests_properties(libretro-smoke PROPERTIES TIMEOUT 180)
   endif()
 endif()

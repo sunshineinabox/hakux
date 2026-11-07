@@ -216,6 +216,11 @@ bool nc_core_boot(NcCore *c, int disc_fd)
         snprintf(xbe_path, sizeof(xbe_path), "%s", update);
         snprintf(c->kernel.image_path, sizeof(c->kernel.image_path), "%s", update);
     }
+    /* the frontend's XBE patch for the XBE booting (not a savestate's, whose
+     * memory holds the code it ran) */
+    if (!g_loadstate[0]) {
+        nc_mods_xbe_patches(disc_fd >= 0 ? &c->disc : NULL, xbe_path);
+    }
     if (!nc_xbe_load(&c->vm, &c->disc, xbe_path, &c->kernel, &c->xbe)) {
         char why[256], host[512];
         if (!strcasecmp(xbe_path, NC_DASHBOARD_PATH) && !nc_io_host_file(xbe_path, host, sizeof(host))) {

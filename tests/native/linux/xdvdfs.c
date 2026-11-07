@@ -87,7 +87,13 @@ static int image(void)
         x[13] = 3;
         memcpy(x + 14, k ? "BBB" : "AAA", 3);
     }
-    if (write(fd, img, sizeof(img)) != (ssize_t)sizeof(img)) {
+    /* F79's 79 bytes at its sector (the overlay's patches go over them) */
+    uint8_t data[79];
+    for (unsigned i = 0; i < sizeof(data); i++) {
+        data[i] = (uint8_t)(i * 7 + 1);
+    }
+    if (write(fd, img, sizeof(img)) != (ssize_t)sizeof(img) ||
+        pwrite(fd, data, sizeof(data), (off_t)1079 * SECTOR) != (ssize_t)sizeof(data)) {
         close(fd);
         return -1;
     }
@@ -167,6 +173,7 @@ int main(void)
 {
     int fd = image();
     const int fd_listing = fd >= 0 ? dup(fd) : -1;
+    const int fd_patch = fd >= 0 ? dup(fd) : -1;
     NcDisc d;
     if (fd < 0 || !nc_disc_open(&d, fd)) {
         printf("FAIL the image\n");
@@ -195,6 +202,25 @@ int main(void)
     check(loop_read && nc_xdvdfs_walk(img_loop, SECTOR, list_add, &ll) && !strcmp(ll.text, "AAA BBB"),
           "LOOP's listing: each entry once");
     close(fd_listing);
+
+    /* patches all at once (an XBE patch's runs): one past the file's end
+     * and none of them is applied; all in it and each is */
+    NcDisc pd;
+    check(fd_patch >= 0 && nc_disc_open(&pd, fd_patch), "the image again");
+    NcDiscFile pf;
+    uint8_t orig[79], got[79];
+    check(nc_disc_find(&pd, "F79", &pf) && nc_disc_read(&pd, &pf, 0, orig, sizeof(orig)), "F79's 79 bytes");
+    static const uint8_t ab[2] = {0xAA, 0xBB}, cde[3] = {0xCC, 0xDD, 0xEE};
+    const NcDiscRun past[] = {{4, 2, ab}, {10, 3, cde}, {77, 3, cde}};
+    check(!nc_disc_overlay_patch_all(&pd, "F79", past, 3) && nc_disc_read(&pd, &pf, 0, got, sizeof(got)) &&
+              !memcmp(got, orig, sizeof(got)),
+          "patches with one past the end: none applied");
+    const NcDiscRun in[] = {{4, 2, ab}, {10, 3, cde}, {76, 3, cde}};
+    check(nc_disc_overlay_patch_all(&pd, "F79", in, 3) && nc_disc_read(&pd, &pf, 0, got, sizeof(got)) &&
+              !memcmp(got + 4, ab, 2) && !memcmp(got + 10, cde, 3) && !memcmp(got + 76, cde, 3) &&
+              !memcmp(got, orig, 4) && !memcmp(got + 6, orig + 6, 4) && !memcmp(got + 13, orig + 13, 63),
+          "patches within it: each applied, the rest as the disc has it");
+    nc_disc_close(&pd);
 
     pthread_attr_t attr;
     pthread_t th;

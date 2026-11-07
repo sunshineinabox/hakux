@@ -118,6 +118,7 @@ add_library(hakux_native STATIC
   core/mods.c
   core/options.c
   core/cheats.c
+  core/xbe_patch.c
   core/memscan.c
   core/core.c
   core/mmio.c

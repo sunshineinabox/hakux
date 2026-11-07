@@ -34,6 +34,14 @@ void nc_mods_install(NcDisc *disc);
 /* The core stopped: the patches remembered, the cheats and the per-boot
  * state dropped (the manifest, the front end's, stays). */
 void nc_mods_reset(void);
+/* Before the XBE at xbe_path boots (the core's choice: the disc's, a
+ * relaunch's): the frontend's XBE patch for it (xbe_patch.h) over the disc's
+ * file when exactly one that is on matches its CRC-32 and size, all its runs
+ * or none; logged otherwise. disc NULL: none (the dashboard). */
+void nc_mods_xbe_patches(NcDisc *disc, const char *xbe_path);
+/* The frontend's patch set (nc_xbe_patch_front_hash) the last boot saw: a
+ * change since takes a restart. */
+uint64_t nc_mods_xbe_patches_booted(void);
 /* The patches of [$u\...] sections (a title update's XBE, a host file) over
  * len bytes read at off of the host file host. */
 void nc_mods_host_patch(const char *host, uint64_t off, void *buf, size_t len);

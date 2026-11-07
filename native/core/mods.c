@@ -5,6 +5,7 @@
 
 #include "native/core/cheats.h"
 #include "native/core/memscan.h"
+#include "native/core/xbe_patch.h"
 #include "native/cpu/cpu.h"
 #include "native/dev/dev.h"
 #include "native/kernel/kernel.h"
@@ -17,6 +18,7 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <zlib.h>
 
 static char g_manifest[512];
 static NcVm *g_vm;
@@ -301,6 +303,75 @@ static void patch(NcDisc *disc, const char *xbe, const char *mod, const char *li
             nc_log("hakuX-native-mods", "%s: [%s] %08x: %u bytes", mod, xbe, va, nnew);
         }
     }
+}
+
+/* ---- the frontend's XBE patches (xbe_patch.h) ---- */
+
+static uint64_t g_xbe_patch_booted;     /* atomic: the patch set the last boot saw */
+
+uint64_t nc_mods_xbe_patches_booted(void)
+{
+    return __atomic_load_n(&g_xbe_patch_booted, __ATOMIC_ACQUIRE);
+}
+
+void nc_mods_xbe_patches(NcDisc *disc, const char *xbe_path)
+{
+    static const char cd[] = "\\Device\\CdRom0\\";
+    char on[160];
+    const unsigned n = nc_xbe_patch_front_list(on, sizeof(on));
+    if (!n) {
+        __atomic_store_n(&g_xbe_patch_booted, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    const char *rel = !strncasecmp(xbe_path, cd, sizeof(cd) - 1)                     ? xbe_path + sizeof(cd) - 1
+                      : xbe_path[0] == '\\' && strncasecmp(xbe_path, "\\Device\\", 8) ? xbe_path + 1
+                                                                                     : NULL;
+    NcDiscFile f;
+    if (!disc || !rel || !nc_disc_find(disc, rel, &f) || (f.attr & 0x10)) {
+        __atomic_store_n(&g_xbe_patch_booted, nc_xbe_patch_front_hash(), __ATOMIC_RELEASE);
+        nc_log("hakuX-native-mods", "XBE patches (%s): %s isn't on the disc; they patch disc XBEs", on, xbe_path);
+        return;
+    }
+    /* the executable as it would load: its CRC-32 */
+    uLong crc = crc32(0, NULL, 0);
+    static uint8_t buf[1 << 16];
+    for (uint32_t at = 0; at < f.size;) {
+        const uint32_t k = f.size - at < sizeof(buf) ? f.size - at : (uint32_t)sizeof(buf);
+        if (!nc_disc_read(disc, &f, at, buf, k)) {
+            __atomic_store_n(&g_xbe_patch_booted, nc_xbe_patch_front_hash(), __ATOMIC_RELEASE);
+            nc_log("hakuX-native-mods", "XBE patches: %s can't be read: none applied", rel);
+            return;
+        }
+        crc = crc32(crc, buf, k);
+        at += k;
+    }
+    static NcXbePatch p;
+    unsigned index = 0, other = 0;
+    uint64_t hash = 0;
+    const int found = nc_xbe_patch_front_match((uint32_t)crc, f.size, &p, &index, &other, &hash);
+    __atomic_store_n(&g_xbe_patch_booted, hash, __ATOMIC_RELEASE);
+    if (found == 0) {
+        nc_log("hakuX-native-mods", "XBE patches (%s): none for %s (%08X:%08X), booting it unpatched", on, rel,
+               (unsigned)crc, f.size);
+        return;
+    }
+    if (found < 0) {
+        nc_log("hakuX-native-mods", "XBE patches: cheats %u and %u both patch %s (%08X:%08X): neither applied", index,
+               other, rel, (unsigned)crc, f.size);
+        return;
+    }
+    static NcDiscRun runs[NC_XBE_PATCH_RUNS_MAX];
+    unsigned bytes = 0;
+    for (unsigned i = 0; i < p.nruns; i++) {
+        runs[i] = (NcDiscRun){p.runs[i].off, p.runs[i].len, p.runs[i].bytes};
+        bytes += p.runs[i].len;
+    }
+    if (!nc_disc_overlay_patch_all(disc, rel, runs, p.nruns)) {
+        nc_log("hakuX-native-mods", "XBE patch (cheat %u): can't be applied to %s: booting it unpatched", index, rel);
+        return;
+    }
+    nc_log("hakuX-native-mods", "XBE patch (cheat %u): %u runs, %u bytes over %s (%08X:%08X)", index, p.nruns, bytes,
+           rel, (unsigned)crc, f.size);
 }
 
 /* The file name of a path (either slash). */

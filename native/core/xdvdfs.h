@@ -72,6 +72,13 @@ bool nc_disc_read_file(const NcDisc *d, const NcDiscFile *f, uint64_t off, void 
 bool nc_disc_overlay_file(NcDisc *d, const char *path, const char *host);
 void nc_disc_overlay_seal(NcDisc *d);
 bool nc_disc_overlay_patch(NcDisc *d, const char *path, uint64_t off, const uint8_t *bytes, uint32_t len);
+/* n patches of the file at path, all of them or none (false) */
+typedef struct NcDiscRun {
+    uint64_t off;
+    uint32_t len;
+    const uint8_t *bytes;
+} NcDiscRun;
+bool nc_disc_overlay_patch_all(NcDisc *d, const char *path, const NcDiscRun *runs, unsigned n);
 /* The disc's own file and bytes, past the overlay and its patches (what
  * identifies the game for savestates, the bytes a patch replaced). */
 bool nc_disc_find_orig(const NcDisc *d, const char *path, NcDiscFile *out);

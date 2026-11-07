@@ -41,7 +41,8 @@
  * HARNESS_CHEATS="code|code|...": a game's cheats, applied as RetroArch
  * applies them (retro_cheat_reset, then each one on) after retro_load_game,
  * before the video driver starts; HARNESS_CHEATS_AT=N again before the Nth
- * retro_run, as a cheat toggled in RetroArch's menu does.
+ * retro_run, as a cheat toggled in RetroArch's menu does (HARNESS_CHEATS_LATE=1:
+ * only then, as a .cht loaded from the menu while the game runs).
  * HARNESS_CYCLES=N: the game loaded, run and unloaded N times, the core
  * closed and opened again between, as RetroArch does between games; after
  * each, the core closed, the threads, descriptors, memory and signal
@@ -507,7 +508,9 @@ static int play(const struct retro_game_info *game, long frames)
     p_retro_get_system_av_info(&av);
     printf("loaded: %ux%u, aspect %.3f\n", av.geometry.base_width, av.geometry.base_height,
            av.geometry.aspect_ratio);
-    apply_cheats();                         /* RetroArch: as the content loads, before its drivers */
+    if (!getenv("HARNESS_CHEATS_LATE")) {
+        apply_cheats();                     /* RetroArch: as the content loads, before its drivers */
+    }
     if (g_hw.context_reset) {               /* as RetroArch's video driver starts */
         if (!hv_load() || !hv_create(g_neg)) {
             fprintf(stderr, "FAIL: no Vulkan device for the core\n");

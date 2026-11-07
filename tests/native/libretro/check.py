@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'linux'))
 from check import disc, run  # noqa: E402  (the day-one fixtures)
@@ -349,6 +350,41 @@ def main():
                    {'reset at frame 20': 1, 'reset: the core stopped in': 1,
                     "the frontend's cheat 0: an address isn't mapped (yet)": 2},
                    dict(vk, HARNESS_CHEATS='w8 0x100 1', HARNESS_RESET_AT='20'))
+        # XBE patches (xbe-patch-v1 codes, a .cht's emulator-handled
+        # entries): over the XBE as it boots when its CRC-32 and size match.
+        # The title halts only with the memory cheat (its byte) and the patch
+        # (its jmp $ made hlt) both on: the two kinds side by side.
+        disc(root / 'xbepatch.iso',
+             b'\x80\x3d\x00\x0e\x01\x00\x5a'   # cmp byte [0x10e00], 0x5a
+             b'\x75\xf7'                       # jne back
+             b'\xeb\xfe')                      # jmp $ (at file offset 0x1009)
+        xbe = xbe_of(root / 'xbepatch.iso')
+
+        def patch(crc=zlib.crc32(xbe), size=len(xbe), runs='+00001009:F4F4'):
+            return f'xbe-patch-v1 {crc:08X}:{size:08X}{runs}'
+        poke = 'w8 0x10E00 0x5A'
+        xp = [args.harness, args.core, root / 'xbepatch.iso', 600, root / 'saves']
+        run(xp, 0, ('XBE patch (cheat 1): 1 runs, 2 bytes over default.xbe', 'guest executed HLT'),
+            dict(vk, HARNESS_CHEATS=f'{poke}|{patch()}'))
+        xp60 = xp[:3] + [60] + xp[4:]
+        run_without(xp60, ('ran 60 frames',), ('guest executed HLT',), dict(vk, HARNESS_CHEATS=poke))
+        run_without(xp60, ('XBE patch (cheat 0)', 'ran 60 frames'), ('guest executed HLT',),
+                    dict(vk, HARNESS_CHEATS=patch()))
+        # another revision's (its CRC, its size), a malformed one, two for
+        # the same XBE: it boots unpatched
+        for codes, marker in ((patch(crc=zlib.crc32(xbe) ^ 1), 'none for default.xbe'),
+                              (patch(size=len(xbe) + 0x1000), 'none for default.xbe'),
+                              (patch(runs='+00000002:F4F4'), 'below offset 4'),
+                              (patch(runs='+00001009:F4+00001009:F4'), 'not after run 1'),
+                              (f'{patch()}|{patch(runs="+00001009:F4")}', 'cheats 1 and 2 both patch default.xbe')):
+            run_without(xp60, (marker, 'ran 60 frames'), ('guest executed HLT', 'XBE patch (cheat'),
+                        dict(vk, HARNESS_CHEATS=f'{poke}|{codes}'))
+        # turned on while the game runs it takes a restart (Quick Menu,
+        # Restart): told once, then the restarted game is patched
+        run_counts(xp[:3] + [120] + xp[4:],
+                   {'XBE patches changed since the boot': 1, 'XBE patch (cheat 1)': 1, 'guest executed HLT': 1},
+                   dict(vk, HARNESS_CHEATS=f'{poke}|{patch()}', HARNESS_CHEATS_AT='10', HARNESS_CHEATS_LATE='1',
+                        HARNESS_RESET_AT='20'))
         # M2: the core stops in the process and boots again: 100 games and 20
         # from a CHD, a CPU in a loop that never enters the kernel, the
         # renderer on a device of its own and on the frontend's, a reset, a
