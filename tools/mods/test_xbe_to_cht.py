@@ -80,6 +80,18 @@ def main():
             check(rc != 0 and not out and "the XBE's magic" in err, f'refused: {err.strip()}')
         else:
             print('SKIP: IPS and BPS (no Floating IPS)')
+        # a long edit's last part takes the edit just after it: 43 times a
+        # 65-byte edit and a 1-byte one 2 bytes on fit 86 runs (joining
+        # before splitting made 129, refused)
+        dense = bytearray(stock)
+        for i in range(43):
+            at = 0x200 + 0x100 * i
+            for j in list(range(65)) + [67]:
+                dense[at + j] ^= 0xFF
+        (tmp / 'dense.xbe').write_bytes(dense)
+        rc, out, err = convert(tmp / 'stock.xbe', tmp / 'dense.xbe')
+        n = len(re.findall(r'\+[0-9A-F]{8}:', out))
+        check(rc == 0 and n == 86, f'packed as they come: {n} runs ({err.strip()})')
         for name, data, why in (('longer.xbe', bytes(patched) + b'\0', 'keeps the size'),
                                 ('same.xbe', bytes(stock), 'changes nothing'),
                                 ('many.xbe', bytes(b ^ 1 if 4 <= i < 0x3FFF and i % 16 == 4 else b

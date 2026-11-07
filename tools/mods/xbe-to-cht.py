@@ -76,19 +76,23 @@ def spans(a, b):
 
 
 def runs(stock, patched):
-    """the differing stretches as runs: close ones joined (a few unchanged
-    bytes are shorter than a new run), none over RUN_MAX bytes"""
-    joined = []
+    """the differing stretches packed into runs of up to RUN_MAX bytes as
+    they come: a stretch BRIDGE or fewer unchanged bytes after the run goes
+    into it while there's room (a long stretch's last part takes the edits
+    after it too)"""
+    out, cur = [], None             # cur: [start, end) of the run being filled
     for s, e in spans(stock, patched):
-        if joined and s - joined[-1][1] <= BRIDGE and e - joined[-1][0] <= RUN_MAX:
-            joined[-1][1] = e
-        else:
-            joined.append([s, e])
-    out = []
-    for s, e in joined:
-        for at in range(s, e, RUN_MAX):
-            out.append((at, patched[at:min(at + RUN_MAX, e)]))
-    return out
+        while s < e:
+            if cur and s - cur[1] <= BRIDGE and s < cur[0] + RUN_MAX:
+                cur[1] = min(e, cur[0] + RUN_MAX)
+            else:
+                if cur:
+                    out.append(cur)
+                cur = [s, min(e, s + RUN_MAX)]
+            s = cur[1]
+    if cur:
+        out.append(cur)
+    return [(a, patched[a:b]) for a, b in out]
 
 
 def code(stock, patched):

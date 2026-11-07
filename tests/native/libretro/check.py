@@ -379,17 +379,22 @@ def main():
                               (f'{patch()}|{patch(runs="+00001009:F4")}', 'cheats 1 and 2 both patch default.xbe')):
             run_without(xp60, (marker, 'ran 60 frames'), ('guest executed HLT', 'XBE patch (cheat'),
                         dict(vk, HARNESS_CHEATS=f'{poke}|{codes}'))
-        # turned on while the game runs it takes a restart (Quick Menu,
-        # Restart): told once, then the restarted game is patched
-        run_counts(xp[:3] + [120] + xp[4:],
+        # turned on while the game runs (after its boot read the patches:
+        # the XBE loaded) it takes a restart (Quick Menu, Restart): told once,
+        # then the restarted game is patched
+        late = dict(vk, HARNESS_CHEATS_LATE='1', HARNESS_READY='stage S0 xbe loaded')
+        run_counts(xp,
                    {'XBE patches changed since the boot': 1, 'XBE patch (cheat 1)': 1, 'guest executed HLT': 1},
-                   dict(vk, HARNESS_CHEATS=f'{poke}|{patch()}', HARNESS_CHEATS_AT='10', HARNESS_CHEATS_LATE='1',
-                        HARNESS_RESET_AT='20'))
+                   dict(late, HARNESS_CHEATS=f'{poke}|{patch()}', HARNESS_CHEATS_AT='r1', HARNESS_RESET_AT='m5'))
         # on, off (the set the game booted with: nothing to tell), on again:
         # told each time it differs
-        run_counts(xp60, {'XBE patches changed since the boot': 2, 'frame 15: cheats off': 1},
-                   dict(vk, HARNESS_CHEATS=patch(), HARNESS_CHEATS_AT='10,20', HARNESS_CHEATS_LATE='1',
-                        HARNESS_CHEATS_OFF_AT='15'))
+        run_counts(xp[:3] + [300] + xp[4:], {'XBE patches changed since the boot': 2, 'cheats off': 1},
+                   dict(late, HARNESS_CHEATS=patch(), HARNESS_CHEATS_AT='r1,m10', HARNESS_CHEATS_OFF_AT='m5'))
+        # RetroArch numbers the cheats that are on: a memory cheat turned off
+        # before the patch moves it from 1 to 0, the same patch, nothing to tell
+        run_counts(xp[:3] + [300] + xp[4:], {'XBE patches changed since the boot': 0, 'XBE patch (cheat 1)': 1},
+                   dict(vk, HARNESS_CHEATS=f'w8 0x10E04 1|{patch()}', HARNESS_CHEATS2=patch(),
+                        HARNESS_READY='stage S0 xbe loaded', HARNESS_CHEATS2_AT='r5'))
         # M2: the core stops in the process and boots again: 100 games and 20
         # from a CHD, a CPU in a loop that never enters the kernel, the
         # renderer on a device of its own and on the frontend's, a reset, a

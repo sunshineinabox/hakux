@@ -157,7 +157,9 @@ bool nc_xbe_patch_front_set(unsigned index, bool on, const char *code, char *err
     pthread_mutex_lock(&g_mu);
     free(g_front[index].p);
     g_front[index].p = p;
-    g_front[index].hash = p ? code_hash(code) * (2 * index + 1) : 0;
+    /* not the index's: RetroArch numbers the cheats that are on, so turning
+     * an earlier one off moves the same patch to another index */
+    g_front[index].hash = p ? code_hash(code) : 0;
     pthread_mutex_unlock(&g_mu);
     return ok;
 }

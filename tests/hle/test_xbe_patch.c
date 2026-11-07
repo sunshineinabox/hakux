@@ -134,11 +134,16 @@ static void test_front(void)
     HT_CHECK(!nc_xbe_patch_front_set(2, true, "xbe-patch-v1 DF0DB6D8:00157000+00000000:A0", err, sizeof(err)));
     HT_EQ_STR(err, "run 1: below offset 4 (the XBE's magic)");
     HT_EQ_INT(nc_xbe_patch_front_match(0xDF0DB6D8, 0x157000, &p, &i, &j, NULL), 0);
-    /* the same codes at other indices: another set */
+    /* the same codes at other indices (RetroArch renumbers the cheats that
+     * are on): the same set */
     HT_CHECK(nc_xbe_patch_front_set(2, true, A, err, sizeof(err)));
     HT_CHECK(nc_xbe_patch_front_hash() == two);
     nc_xbe_patch_front_set(2, false, NULL, NULL, 0);
-    nc_xbe_patch_front_set(3, true, A, err, sizeof(err));
+    nc_xbe_patch_front_set(5, false, NULL, NULL, 0);
+    nc_xbe_patch_front_set(0, true, A, err, sizeof(err));
+    nc_xbe_patch_front_set(1, true, B, err, sizeof(err));
+    HT_CHECK(nc_xbe_patch_front_hash() == two);
+    nc_xbe_patch_front_set(1, false, NULL, NULL, 0);
     HT_CHECK(nc_xbe_patch_front_hash() != two);
     HT_CHECK(!nc_xbe_patch_front_set(256, true, A, err, sizeof(err)));
     nc_xbe_patch_front_reset();

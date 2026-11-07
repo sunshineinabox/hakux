@@ -51,7 +51,7 @@ bool nc_xbe_patch_parse(const char *code, NcXbePatch *out, char *err, size_t err
  * and off, with why in err when the code isn't one. */
 bool nc_xbe_patch_front_set(unsigned index, bool on, const char *code, char *err, size_t errlen);
 void nc_xbe_patch_front_reset(void);
-/* The patches on now: their codes' hash (0: none). */
+/* The patches on now: their codes' hash, whatever their indices (0: none). */
 uint64_t nc_xbe_patch_front_hash(void);
 /* For an XBE of crc and size: 1 with the one patch on for it in *out and
  * its index in *index; 0 when none is; -1 when more than one is (a
