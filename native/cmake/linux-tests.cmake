@@ -86,6 +86,9 @@ target_link_libraries(usb-smoke PRIVATE Threads::Threads m)
 add_test(NAME usb-smoke COMMAND usb-smoke)
 set_tests_properties(usb-smoke PROPERTIES TIMEOUT 10)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+# The .cht converter for XBE patches (its IPS and BPS cases with Floating IPS).
+add_test(NAME xbe-to-cht COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tools/mods/test_xbe_to_cht.py")
+set_tests_properties(xbe-to-cht PROPERTIES TIMEOUT 30)
 if(NC_GUEST_TESTS)
   add_test(NAME linux-boundaries
            COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tests/native/linux/check.py" "$<TARGET_FILE_DIR:xboxrun>")
