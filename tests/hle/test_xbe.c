@@ -120,7 +120,7 @@ static void test_lookups(void)
 /* fx_build_xbe() has room for 18 section headers; this moves them to
  * 0x1000 (names after them) so nsec up to HLE_XBE_MAX_SECTIONS + 1 fit.
  * Section i is "S<i>" at 0x11000 + i * 0x1000, the last one "XGRPH". */
-static uint8_t big[0x6000];
+static uint8_t big[0x12000];
 
 static uint32_t build_many_sections(unsigned nsec)
 {
@@ -146,7 +146,8 @@ static uint32_t build_many_sections(unsigned nsec)
     return sizeof(big);
 }
 
-/* Fable has 107 sections; the old cap of 96 rejected it. */
+/* Fable has 107 sections (the cap of 96 rejected it), Spikeout - Battle
+ * Street 398 (the cap of 256 did). */
 static void test_many_sections(void)
 {
     HleXbeInfo x;
@@ -168,6 +169,12 @@ static void test_many_sections(void)
     HT_CHECK(s && strcmp(s->name, "S100") == 0);
     HT_EQ_U32(x.nlibs, 3);
     HT_EQ_U32(x.title_id, 0x4D530064);
+
+    len = build_many_sections(398);
+    HT_EQ_INT(hle_xbe_parse(big, len, &x), HLE_XBE_OK);
+    HT_EQ_U32(x.nsections, 398);
+    HT_EQ_STR(x.sections[300].name, "S300");
+    HT_EQ_STR(x.sections[397].name, "XGRPH");
 
     len = build_many_sections(HLE_XBE_MAX_SECTIONS);
     HT_EQ_INT(hle_xbe_parse(big, len, &x), HLE_XBE_OK);
