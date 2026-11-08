@@ -53,3 +53,8 @@ One entry per section version (tools/native/statelock.py).
 
 - the kernel pool's first 64 KiB range sits just above the kernel (physical 0x50000), not 512 KiB under the top reserve (Burnout 2 lays out 0x2377000-0x3F00000 at fixed addresses); a state's boot puts it under the state's process object (v1, v2 states, and states saved since by a run that loaded one: where it was)
 - upgraded: v1..v2 states load
+
+## THRD v3 (2026-11-04, after 0897cd025e)
+
+- NcThread.priority is the current priority and KTHREAD.BasePriority the base (priority boosts after waits, the Xbox kernel's); v2 states: the priority was the base, copied to KTHREAD.BasePriority as they load
+- upgraded: v1..v2 states load

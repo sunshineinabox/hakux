@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The libretro core's audio output (native/libretro/audio.c) against a
  * frontend that takes all, part or none of what it is offered: the frames it
  * takes leave the ring, the rest are offered again first, in order, nothing

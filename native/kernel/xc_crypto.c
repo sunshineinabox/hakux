@@ -382,6 +382,84 @@ bool nc_modexp(uint32_t *a, const uint32_t *b, const uint32_t *c, const uint32_t
     return true;
 }
 
+static uint32_t get32(const uint8_t *p)
+{
+    return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* r = a - b over n words; returns the borrow out. */
+static uint32_t sub_words(uint32_t *r, const uint32_t *a, const uint32_t *b, unsigned n)
+{
+    uint64_t borrow = 0;
+    for (unsigned i = 0; i < n; i++) {
+        const uint64_t t = (uint64_t)a[i] - b[i] - borrow;
+        r[i] = (uint32_t)t;
+        borrow = t >> 63;
+    }
+    return (uint32_t)borrow;
+}
+
+/* r += b over n words (b of bn <= n); the carry out is dropped. */
+static void add_words(uint32_t *r, const uint32_t *b, unsigned bn, unsigned n)
+{
+    uint64_t carry = 0;
+    for (unsigned i = 0; i < n; i++) {
+        const uint64_t t = (uint64_t)r[i] + (i < bn ? b[i] : 0) + carry;
+        r[i] = (uint32_t)t;
+        carry = t >> 32;
+    }
+}
+
+bool nc_xc_pk_private(const uint8_t *key, const uint8_t *in, uint8_t *out)
+{
+    const uint32_t keylen = get32(key + 4), bitlen = get32(key + 8);
+    if (get32(key) != NC_XC_RSA2 || !bitlen || keylen < bitlen / 8 || keylen > 1024 || keylen % 8) {
+        return false;
+    }
+    const unsigned n = keylen / 4, h = n / 2;
+    uint32_t *w = calloc(2 * n + 8 * h, 4);
+    uint32_t *x = w, *m = x + n, *p = m + n, *q = p + h, *dp = q + h, *dq = dp + h, *qinv = dq + h;
+    uint32_t *m1 = qinv + h, *m2 = m1 + h, *t = m2 + h;
+    memcpy(x, in, bitlen / 8);
+    memcpy(m, key + 0x14, keylen);
+    memcpy(p, key + 0x14 + keylen, 5 * (keylen / 2)); /* prime1 .. coefficient */
+    /* the input must be below the modulus */
+    int i = (int)n - 1;
+    while (i > 0 && x[i] == m[i]) {
+        i--;
+    }
+    bool ok = x[i] < m[i];
+    /* By the Chinese remainder theorem, as the Xbox kernel: m1 = x^dp mod p,
+     * m2 = x^dq mod q, then out = m2 + q * (qinv * (m1 - m2) mod p). */
+    if (ok) {
+        mod_reduce(t, x, n, p, h);
+        ok = nc_modexp(m1, t, dp, p, h);
+        mod_reduce(t, x, n, q, h);
+        ok = ok && nc_modexp(m2, t, dq, q, h);
+    }
+    if (ok) {
+        mod_reduce(t, m2, h, p, h);
+        if (sub_words(t, m1, t, h)) {
+            add_words(t, p, h, h);
+        }
+        mul_mod(t, qinv, t, p, h);
+        memset(x, 0, n * 4);
+        for (unsigned a = 0; a < h; a++) {
+            uint64_t carry = 0;
+            for (unsigned b = 0; b < h; b++) {
+                const uint64_t v = (uint64_t)t[a] * q[b] + x[a + b] + carry;
+                x[a + b] = (uint32_t)v;
+                carry = v >> 32;
+            }
+            x[a + h] = (uint32_t)carry;
+        }
+        add_words(x, m2, h, n);
+        memcpy(out, x, keylen);
+    }
+    free(w);
+    return ok;
+}
+
 static void put32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)v;

@@ -54,12 +54,23 @@ add_executable(xc-test "${NC_REPO}/tests/native/xc/xc_test.c" "${NC_REPO}/native
 target_include_directories(xc-test PRIVATE "${NC_REPO}")
 add_test(NAME xc-test COMMAND xc-test)
 set_tests_properties(xc-test PROPERTIES TIMEOUT 10)
+# Check the runtime library's string and number conversions and its printf.
+add_executable(rtl-text-test "${NC_REPO}/tests/native/rtl/text_test.c" "${NC_REPO}/native/kernel/rtl_text.c")
+target_include_directories(rtl-text-test PRIVATE "${NC_REPO}")
+add_test(NAME rtl-text-test COMMAND rtl-text-test)
+set_tests_properties(rtl-text-test PROPERTIES TIMEOUT 10)
 # Check disc directory lookup and listing on deep and looping trees.
 add_executable(xdvdfs-test "${NC_REPO}/tests/native/linux/xdvdfs.c")
 target_include_directories(xdvdfs-test PRIVATE "${NC_REPO}")
 target_link_libraries(xdvdfs-test PRIVATE hakux_native Threads::Threads)
 add_test(NAME xdvdfs-test COMMAND xdvdfs-test)
 set_tests_properties(xdvdfs-test PROPERTIES TIMEOUT 10)
+# Alias-table overflow must preserve page ownership and protection.
+add_executable(vm-alias-test "${NC_REPO}/tests/native/linux/vm_alias.c")
+target_include_directories(vm-alias-test PRIVATE "${NC_REPO}")
+target_link_libraries(vm-alias-test PRIVATE hakux_native Threads::Threads)
+add_test(NAME vm-alias-test COMMAND vm-alias-test)
+set_tests_properties(vm-alias-test PROPERTIES TIMEOUT 10)
 # Exercise NAT with console frames and a fake UPnP router.
 add_executable(nat-smoke "${NC_REPO}/tests/native/linux/nat.c")
 target_link_libraries(nat-smoke PRIVATE hakux_native Threads::Threads)
@@ -84,6 +95,22 @@ if(NC_GUEST_TESTS)
   add_test(NAME linux-boundaries
            COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tests/native/linux/check.py" "$<TARGET_FILE_DIR:xboxrun>")
   set_tests_properties(linux-boundaries PROPERTIES TIMEOUT 60)
+  # The kernel's queues, completion ports, IRPs and drivers driven by guest
+  # code (assembled for i386 by the compiler; skipped without ld.lld).
+  add_test(NAME kernel-io
+           COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tests/native/linux/kernel_io.py" "$<TARGET_FILE_DIR:xboxrun>"
+                   "${CMAKE_C_COMPILER}")
+  set_tests_properties(kernel-io PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+  # Failed commits must not leak physical pages or reservations.
+  add_test(NAME kernel-mm
+           COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tests/native/linux/kernel_mm.py" "$<TARGET_FILE_DIR:xboxrun>"
+                   "${CMAKE_C_COMPILER}")
+  set_tests_properties(kernel-mm PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+  # Boot RAM reservations, page-table aliases, and stack padding.
+  add_test(NAME kernel-boot-mem
+           COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tests/native/linux/kernel_boot_mem.py" "$<TARGET_FILE_DIR:xboxrun>"
+                   "${CMAKE_C_COMPILER}")
+  set_tests_properties(kernel-boot-mem PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
 endif()
 if(TARGET hakux_libretro)
   # The APU made again in one process (a relaunch), its EP's samples through

@@ -3,7 +3,8 @@
  * FIPS 180-1 (SHA-1), RFC 2202 (HMAC-SHA1), FIPS 46 worked example (DES),
  * the classic RC4 vector, and modexp against a 128-bit reference.
  * Also checks that a signature from nc_xc_sign verifies with the synthetic
- * XePublicKeyData.
+ * XePublicKeyData, and that a private-key blob (a 512-bit RSA key openssl
+ * made) undoes its public key.
  *
  *   gcc -O1 -I<repo> tests/native/xc/xc_test.c native/kernel/xc_crypto.c -o xc_test && ./xc_test
  */
@@ -53,6 +54,76 @@ static uint64_t powmod_ref(uint64_t b, uint64_t e, uint64_t m)
         e >>= 1;
     }
     return (uint64_t)r;
+}
+
+/* A big-endian hex number as len little-endian bytes. */
+static void le_hex(uint8_t *dst, size_t len, const char *hex)
+{
+    memset(dst, 0, len);
+    const size_t n = strlen(hex);
+    for (size_t i = 0; i < n && i / 2 < len; i++) {
+        const char c = hex[n - 1 - i];
+        const unsigned v = c <= '9' ? (unsigned)(c - '0') : (unsigned)((c | 0x20) - 'a' + 10);
+        dst[i / 2] |= (uint8_t)(v << (4 * (i % 2)));
+    }
+}
+
+static void le32(uint8_t *p, uint32_t v)
+{
+    memcpy(p, &v, 4);
+}
+
+/* The private-key operation (XcPKDecPrivate's) on an RSA2 blob: it undoes
+ * the public key both ways and refuses inputs not below the modulus. */
+static void pk_private(void)
+{
+    enum { BITS = 512, KL = BITS / 8 + 8, HL = KL / 2, N = KL / 4 };
+    static const char *const n_hex = "d5e6e88d4d9f7d418bb0536e4b323b09334d5997878e20ff21ee5adf19dd7a5f"
+                                     "8876eed3fabaa020301b8d13b06c55e5db2b12ace3222d8810871a0c60a6dded";
+    static const char *const d_hex = "c3b81ac5606734b70ad7f61f0f5310cda4517c4eb84c06492c84ea450567b015"
+                                     "9972c07ca869404ae6d315a3207a1ffed4ddddba92f40b6e2c5785173b880541";
+    static const char *const crt[5] = {
+        "ef45e2ab4fe59115c177153ccf5aeb5188d727c523f7d90deb603cde7fcd3879", /* prime1 */
+        "e4daf97678ca59504b97e3b151bb7ea3d71e77527891b1034da4214266c41c15", /* prime2 */
+        "bfcad0ea68dca6f33d646acd9798554fc1d454b89d202a081247ce02bb869061", /* exponent1 */
+        "888514219746e6669ee199e372654dd381055c9ae6efca4fb5263eecf48ef24d", /* exponent2 */
+        "d07408af794ee8b48727cf73dff272fe6ca95d6c4903cd89048bcdfaaf6a9236", /* coefficient */
+    };
+    uint8_t prv[0x14 + KL + 5 * HL + KL];
+    le32(prv, NC_XC_RSA2);
+    le32(prv + 4, KL);
+    le32(prv + 8, BITS);
+    le32(prv + 0xC, BITS / 8 - 1);
+    le32(prv + 0x10, 65537);
+    le_hex(prv + 0x14, KL, n_hex);
+    for (int i = 0; i < 5; i++) {
+        le_hex(prv + 0x14 + KL + i * HL, HL, crt[i]);
+    }
+    le_hex(prv + 0x14 + KL + 5 * HL, KL, d_hex);
+
+    uint32_t msg[N] = {0}, e[N] = {65537}, mod[N], c[N], out[N];
+    uint8_t *mb = (uint8_t *)msg;
+    for (int i = 0; i < BITS / 8 - 1; i++) {
+        mb[i] = (uint8_t)(i * 37 + 5);
+    }
+    memcpy(mod, prv + 0x14, KL);
+
+    nc_modexp(c, msg, e, mod, N);
+    int ok = nc_xc_pk_private(prv, (const uint8_t *)c, (uint8_t *)out) && memcmp(out, msg, KL) == 0;
+    g_fail += !ok;
+    printf("%s pk private undoes public\n", ok ? "PASS" : "FAIL");
+
+    ok = nc_xc_pk_private(prv, (const uint8_t *)msg, (uint8_t *)c);
+    nc_modexp(out, c, e, mod, N);
+    ok = ok && memcmp(out, msg, KL) == 0;
+    g_fail += !ok;
+    printf("%s pk public undoes private\n", ok ? "PASS" : "FAIL");
+
+    ok = !nc_xc_pk_private(prv, (const uint8_t *)mod, (uint8_t *)out);
+    le32(prv, 0x31415352u); /* RSA1: a public key */
+    ok = ok && !nc_xc_pk_private(prv, (const uint8_t *)msg, (uint8_t *)out);
+    g_fail += !ok;
+    printf("%s pk private refuses the modulus and a public key\n", ok ? "PASS" : "FAIL");
 }
 
 int main(void)
@@ -146,6 +217,7 @@ int main(void)
     }
     g_fail += !blk;
     printf("%s console key signature\n", blk ? "PASS" : "FAIL");
+    pk_private();
     printf("%s\n", g_fail ? "FAILED" : "all passed");
     return g_fail != 0;
 }

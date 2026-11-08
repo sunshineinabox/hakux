@@ -1,4 +1,5 @@
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 # The pinned dsp56300 C FFI, compiled for the same Linux host (AArch64 or
 # x86-64: Cranelift emits code for either, its ISA features the host's).
 if(ANDROID OR NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR

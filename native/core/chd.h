@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * hakuX native core — CHD disc images (MAME's compressed hunks of data, made
  * by chdman createdvd), read through libchdr: the image's bytes as an ISO's.
@@ -21,6 +22,8 @@ typedef struct NcChd NcChd;
 NcChd *nc_chd_open(int fd, bool *is_chd);
 /* len bytes of the image at off; from any thread. */
 bool nc_chd_read(NcChd *c, void *buf, size_t len, uint64_t off);
+/* The image's bytes (as an ISO's). */
+uint64_t nc_chd_size(const NcChd *c);
 void nc_chd_close(NcChd *c);
 
 #ifdef __cplusplus

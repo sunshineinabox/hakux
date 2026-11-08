@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The native bridge over the real DSP56300 JIT (AArch64, x86-64). No guest
  * title or sound device: standalone DSP programs and the APU's parked frame
  * thread. `apu-jit-smoke bench`: the JIT against the C interpreter on two

@@ -1696,15 +1696,16 @@ static void cmd_gamma(const HleCmdGamma *c)
     hle_disp_set_gamma(c->rgb, ident || g_gamma.off);
 }
 
-/* The video overlay over the presented frame (dst: SHADER_READ_ONLY). */
+/* The video overlay, composed into each presented frame (gamma.c). */
 static HleCmdOverlay g_ovl;
 static struct {
     VkImage img;
+    VkImageView view;
     VkDeviceMemory mem;
     uint32_t w, h;
 } g_ovl_img;
 
-/* The overlay's texels (arena) into its image, left TRANSFER_SRC. */
+/* The overlay's texels (arena) into its image, left SHADER_READ_ONLY. */
 static void cmd_overlay(const HleCmdOverlay *c)
 {
     g_ovl = *c;
@@ -1713,18 +1714,21 @@ static void cmd_overlay(const HleCmdOverlay *c)
     }
     if (g_ovl_img.img && (g_ovl_img.w != c->w || g_ovl_img.h != c->h)) {
         flush_idle();
+        T.vkDestroyImageView(g_hvk.dev, g_ovl_img.view, NULL);
+        g_ovl_img.view = VK_NULL_HANDLE;
         T.vkDestroyImage(g_hvk.dev, g_ovl_img.img, NULL);
         T.vkFreeMemory(g_hvk.dev, g_ovl_img.mem, NULL);
         g_ovl_img.img = VK_NULL_HANDLE;
     }
-    VkImageLayout old = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    VkImageLayout old = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!g_ovl_img.img) {
         VkImageCreateInfo ici = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
             .format = VK_FORMAT_B8G8R8A8_UNORM, .extent = { c->w, c->h, 1 }, .mipLevels = 1,
             .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
-            .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
         VkMemoryRequirements req;
         if (T.vkCreateImage(g_hvk.dev, &ici, NULL, &g_ovl_img.img) != VK_SUCCESS) {
@@ -1741,6 +1745,13 @@ static void cmd_overlay(const HleCmdOverlay *c)
             return;
         }
         T.vkBindImageMemory(g_hvk.dev, g_ovl_img.img, g_ovl_img.mem, 0);
+        VkImageViewCreateInfo vci = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_ovl_img.img,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_B8G8R8A8_UNORM,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        if (T.vkCreateImageView(g_hvk.dev, &vci, NULL, &g_ovl_img.view) != VK_SUCCESS) {
+            g_ovl_img.view = VK_NULL_HANDLE;    /* the blit shows it, without the colour key */
+        }
         g_ovl_img.w = c->w;
         g_ovl_img.h = c->h;
         old = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1755,9 +1766,34 @@ static void cmd_overlay(const HleCmdOverlay *c)
     T.vkCmdCopyBufferToImage(cb, g_harena.buf, g_ovl_img.img,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
     hle_img_barrier(cb, g_ovl_img.img, VK_IMAGE_ASPECT_COLOR_BIT,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
+/* Describe the overlay in display pixels; false if unavailable. */
+static bool overlay_params(const HleVkSurf *src, uint32_t dw, uint32_t dh, HleDispOverlay *o)
+{
+    if (!g_ovl.on || !g_ovl_img.view || !g_ovl.fb_w || !g_ovl.fb_h) {
+        return false;
+    }
+    o->view = g_ovl_img.view;
+    for (int i = 0; i < 4; i++) {
+        o->rect[i] = (float)g_ovl.dst[i];
+    }
+    o->in[0] = g_ovl.in_x;
+    o->in[1] = g_ovl.in_y;
+    o->in[2] = g_ovl.scale_x;
+    o->in[3] = g_ovl.scale_y;
+    o->pix[0] = (float)dw / g_ovl.fb_w;
+    o->pix[1] = (float)dh / g_ovl.fb_h;
+    o->key_on = g_ovl.color_key_on != 0;
+    o->key = g_ovl.color_key;
+    /* the key is a pixel's raw value: 16 or 15 bits of a 16-bit frame */
+    o->key_fmt = src->fmt == VK_FORMAT_R5G6B5_UNORM_PACK16 ? 1 :
+                 src->fmt == VK_FORMAT_A1R5G5B5_UNORM_PACK16 ? 2 : 0;
+    return true;
+}
+
+/* Fallback overlay blit when display composition is unavailable. */
 static void overlay_blit(VkCommandBuffer cb, VkImage dst, uint32_t dw, uint32_t dh)
 {
     VkImage img = g_ovl_img.img;
@@ -1765,8 +1801,10 @@ static void overlay_blit(VkCommandBuffer cb, VkImage dst, uint32_t dw, uint32_t 
     if (!g_ovl.on || !img || !g_ovl.fb_w || !g_ovl.fb_h) {
         return;
     }
-    int32_t s0x = MAX(g_ovl.src[0], 0), s0y = MAX(g_ovl.src[1], 0);
-    int32_t s1x = MIN(g_ovl.src[2], (int32_t)tw), s1y = MIN(g_ovl.src[3], (int32_t)th);
+    const float ow = (float)(g_ovl.dst[2] - g_ovl.dst[0]), oh = (float)(g_ovl.dst[3] - g_ovl.dst[1]);
+    int32_t s0x = MAX((int32_t)g_ovl.in_x, 0), s0y = MAX((int32_t)g_ovl.in_y, 0);
+    int32_t s1x = MIN((int32_t)(g_ovl.in_x + ow * g_ovl.scale_x + 0.5f), (int32_t)tw);
+    int32_t s1y = MIN((int32_t)(g_ovl.in_y + oh * g_ovl.scale_y + 0.5f), (int32_t)th);
     float sx = (float)dw / g_ovl.fb_w, sy = (float)dh / g_ovl.fb_h;
     int32_t d0x = (int32_t)(g_ovl.dst[0] * sx), d1x = (int32_t)(g_ovl.dst[2] * sx);
     int32_t d0y = (int32_t)(g_ovl.dst[1] * sy), d1y = (int32_t)(g_ovl.dst[3] * sy);
@@ -1775,6 +1813,8 @@ static void overlay_blit(VkCommandBuffer cb, VkImage dst, uint32_t dw, uint32_t 
     if (s1x <= s0x || s1y <= s0y || d1x <= d0x || d0y == d1y) {
         return;
     }
+    hle_img_barrier(cb, img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     hle_img_barrier(cb, dst, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkImageBlit2 r = {
@@ -1792,10 +1832,12 @@ static void overlay_blit(VkCommandBuffer cb, VkImage dst, uint32_t dw, uint32_t 
     static bool s_first;
     if (!s_first) {
         s_first = true;
-        hle_log("hakuX-hle-back", "overlay: %ux%u drawn at %d,%d-%d,%d", tw, th, d0x, d0y,
-                d1x, d1y);
+        hle_log("hakuX-hle-back", "overlay: %ux%u blitted at %d,%d-%d,%d (no display pass: "
+                "no colour key)", tw, th, d0x, d0y, d1x, d1y);
     }
     hle_img_barrier(cb, dst, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    hle_img_barrier(cb, img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
@@ -1993,11 +2035,15 @@ static void cmd_swap_present(const HleCmdSwap *c)
         /* the part of src shown (HleCmdSwap.src_w / src_h), in its pixels */
         const uint32_t sw = c->src_w ? MIN(src->w, c->src_w * src->scale) : src->w;
         const uint32_t sh = c->src_h ? MIN(src->h, c->src_h * src->scale) : src->h;
-        if (!g_gamma.identity && !g_gamma.off && !hle_disp_gamma_consumer() &&
-            hle_gamma_pass(cb, g_back.cur, g_gamma.rgb, src, sw, sh, dst, dw, dh)) {
-            overlay_blit(cb, dst, dw, dh);
+        /* the gamma ramp and the video overlay: a display pass instead of
+         * the blit */
+        const bool ramp = !g_gamma.identity && !g_gamma.off && !hle_disp_gamma_consumer();
+        HleDispOverlay ov;
+        const bool ovl = overlay_params(src, dw, dh, &ov);
+        if ((ramp || ovl) && hle_display_pass(cb, g_back.cur, ramp ? g_gamma.rgb : NULL, src, sw,
+                                              sh, ovl ? &ov : NULL, dst, dw, dh)) {
             fh_copy(cb, dst, dw, dh);
-            submit(c->value);           /* through the ramp instead of the blit */
+            submit(c->value);
             g_back.st.swaps++;
             return;
         }
@@ -2671,7 +2717,9 @@ int hle_back_start(void)
         }
         return r;
     }
-    /* DXT decoded on the way in (no BC: pbres.c) takes four to eight times the bytes */
+    /* DXT decoded on the way in (no BC: pbres.c) takes four to eight times
+     * the bytes; a DXT volume is decoded even where the rest is encoded as
+     * ETC2, and a level is uploaded whole, so the arena stays 64 MiB */
     const char *what = hle_vk_guest_ram_init() ? "guest RAM" :
                        hle_vk_arena_init(g_hvk.caps.bc ? 32u << 20 : 64u << 20) ? "the upload arena" :
                        hle_vk_land_init(16u << 20) ? "the readback buffer" :
@@ -2772,6 +2820,7 @@ static void back_free(void)
     T.vkDestroyShaderModule(d, g_mc.fs, NULL);
     T.vkDestroyPipelineLayout(d, g_mc.pl, NULL);
     memset(&g_mc, 0, sizeof(g_mc));
+    T.vkDestroyImageView(d, g_ovl_img.view, NULL);
     T.vkDestroyImage(d, g_ovl_img.img, NULL);
     T.vkFreeMemory(d, g_ovl_img.mem, NULL);
     memset(&g_ovl_img, 0, sizeof(g_ovl_img));

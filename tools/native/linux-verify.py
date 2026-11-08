@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026-present PortareOS
-"""Check build/package/hakux-<version>-<architecture>.tar.gz after linux-package.sh,
-in the image that built it, and write its .sha256: the commit's archive, an
-native core with the DSP JIT that reports the version and loads (retro_*
-exports only, no RUNPATH, no SDL), within PortareOS's glibc 2.38 and
-GLIBCXX 3.4.31.
-    python3 tools/native/linux-verify.py <version>
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Verify the release archive and write its SHA-256 checksum.
+
+Check libretro exports, dependencies, DSP JIT, and ABI requirements:
+ARM64: glibc <= 2.38, GLIBCXX <= 3.4.31.
+AMD64: glibc <= 2.35, GLIBCXX <= 3.4.30 (Ubuntu 22.04 sysroot).
+
+Usage: python3 tools/native/linux-verify.py <version>
 """
 from pathlib import Path
 import ctypes
@@ -68,8 +70,9 @@ assert 'libSDL3' not in dynamic and 'libaaudio' not in dynamic
 versions = subprocess.check_output(['readelf', '--version-info', str(core)], text=True)
 glibc = sorted({tuple(map(int, x.split('.'))) for x in re.findall(r'GLIBC_([0-9.]+)', versions)})
 glibcxx = sorted({tuple(map(int, x.split('.'))) for x in re.findall(r'GLIBCXX_([0-9.]+)', versions)})
-assert glibc[-1] <= (2, 38), glibc[-1]
-assert glibcxx[-1] <= (3, 4, 31), glibcxx[-1]
+glibc_max, glibcxx_max = {'aarch64': ((2, 38), (3, 4, 31)), 'x86_64': ((2, 35), (3, 4, 30))}[arch]
+assert glibc[-1] <= glibc_max, glibc[-1]
+assert glibcxx[-1] <= glibcxx_max, glibcxx[-1]
 digest = hashlib.sha256(archive.read_bytes()).hexdigest()
 (package / (archive.name + '.sha256')).write_text(f'{digest}  {archive.name}\n')
 print(f'PASS: release {version}, source {revision}, {arch}, iso|chd, {len(exports)} retro_* exports, no RUNPATH')

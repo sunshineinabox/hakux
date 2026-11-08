@@ -24,6 +24,8 @@ static const HleFmtInfo k_fmt[] = {
     { 0x39, 16, HLE_FI_SWZ }, { 0x3A, 32, HLE_FI_SWZ }, { 0x3B, 32, HLE_FI_SWZ },
     { 0x3C, 32, HLE_FI_SWZ }, { 0x3D, 16, HLE_FI_LIN }, { 0x3E, 16, HLE_FI_LIN },
     { 0x3F, 32, HLE_FI_LIN }, { 0x40, 32, HLE_FI_LIN }, { 0x41, 32, HLE_FI_LIN },
+    /* ETC2 (HLE_XFMT_ETC2_*): the blocks of DXT1 and DXT3/5 */
+    { 0x42, 4, HLE_FI_DXT }, { 0x43, 4, HLE_FI_DXT }, { 0x44, 8, HLE_FI_DXT },
 };
 
 const HleFmtInfo *hle_fmt_info(uint32_t code)

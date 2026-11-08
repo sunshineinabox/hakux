@@ -55,13 +55,16 @@ typedef struct HleCmdZWrite {
     uint32_t dst, src;          /* object ids */
 } HleCmdZWrite;
 
-/* The video overlay (UpdateOverlay / EnableOverlay): on = 0 turns it off;
- * else w x h B8G8R8A8 texels at arena_off become the overlay image, its src
- * rectangle drawn over each presented frame at dst, in back-buffer pixels
- * of a fb_w x fb_h frame. */
+/* The video overlay (PVIDEO): on = 0 turns it off; else w x h B8G8R8A8
+ * texels at arena_off become the overlay image. Each presented frame shows
+ * it in dst (pixels of a fb_w x fb_h frame), sampled from (in_x, in_y) at
+ * scale_x x scale_y texels a pixel; with color_key_on, only where the
+ * frame's pixel is color_key (pb/pvideo.h). */
 typedef struct HleCmdOverlay {
     uint32_t on, arena_off, w, h;
-    int32_t src[4], dst[4];     /* left, top, right, bottom */
+    int32_t dst[4];             /* left, top, right, bottom */
+    float in_x, in_y, scale_x, scale_y;
+    uint32_t color_key_on, color_key;
     uint32_t fb_w, fb_h;
 } HleCmdOverlay;
 

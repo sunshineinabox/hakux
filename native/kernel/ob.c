@@ -20,15 +20,20 @@ static bool freeable(enum NcObType type)
     return type == NC_OB_FILE || type == NC_OB_SYMLINK;
 }
 
-static enum NcObType type_of(NcKernel *k, uint32_t object)
+/* The kernel's object type at type object tva, or NC_OB_TYPES (a title's own). */
+static enum NcObType type_of_va(NcKernel *k, uint32_t tva)
 {
-    const uint32_t tva = nc_vm_rd32(k->vm, object - OB_HEADER + 0x8);
     for (unsigned t = 0; t < NC_OB_TYPES; t++) {
         if (k->type_va[t] == tva) {
             return (enum NcObType)t;
         }
     }
     return NC_OB_TYPES;
+}
+
+static enum NcObType type_of(NcKernel *k, uint32_t object)
+{
+    return type_of_va(k, nc_vm_rd32(k->vm, object - OB_HEADER + 0x8));
 }
 
 /* Frees an object no handle or reference holds any more (PointerCount 1 is
@@ -152,10 +157,102 @@ static uint64_t NtDuplicateObject(NcKernel *k, NcFrame *f, const uint32_t *a)
     return NC_STATUS_SUCCESS;
 }
 
+/* ObfReferenceObject(Object) */
+static uint64_t ObfReferenceObject(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    const uint32_t hdr = a[0] - OB_HEADER;
+    nc_vm_wr32(k->vm, hdr, nc_vm_rd32(k->vm, hdr) + 1);
+    return 0;
+}
+
+/* ObReferenceObjectByPointer(Object, ObjectType): a reference, if of that type (NULL: any) */
+static uint64_t ObReferenceObjectByPointer(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    const uint32_t hdr = a[0] - OB_HEADER;
+    if (a[1] && nc_vm_rd32(k->vm, hdr + 0x8) != a[1]) {
+        return NC_STATUS_OBJECT_TYPE_MISMATCH;
+    }
+    nc_vm_wr32(k->vm, hdr, nc_vm_rd32(k->vm, hdr) + 1);
+    return NC_STATUS_SUCCESS;
+}
+
+/* ObOpenObjectByPointer(Object, ObjectType, Handle): a handle to it, if of that type (NULL: any) */
+static uint64_t ObOpenObjectByPointer(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    if (a[1] && nc_vm_rd32(k->vm, a[0] - OB_HEADER + 0x8) != a[1]) {
+        return NC_STATUS_OBJECT_TYPE_MISMATCH;
+    }
+    const uint32_t h = nc_ob_handle(k, a[0], type_of(k, a[0]));
+    if (!h) {
+        return NC_STATUS_INSUFFICIENT_RESOURCES;
+    }
+    nc_vm_wr32(k->vm, a[2], h);
+    return NC_STATUS_SUCCESS;
+}
+
+/* A name in OBJECT_ATTRIBUTES (ObjectName +4), told once: objects aren't
+ * entered in the namespace by name here. */
+static void name_ignored(NcKernel *k, uint32_t attrs, const char *who)
+{
+    /* TODO: a name in ObjectAttributes isn't entered in the namespace */
+    static bool told;
+    if (attrs && nc_vm_rd32(k->vm, attrs + 4) && !told) {
+        told = true;
+        nc_log("hakuX-native", "ob: %s: the object's name is not entered in the namespace", who);
+    }
+}
+
+/* ObCreateObject(ObjectType, ObjectAttributes, ObjectBodySize, Object): a
+ * zeroed body of ObjectType, the caller's reference on it */
+static uint64_t ObCreateObject(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    name_ignored(k, a[1], "ObCreateObject");
+    const enum NcObType type = type_of_va(k, a[0]);
+    const uint32_t obj = nc_ob_create(k, type < NC_OB_TYPES ? type : NC_OB_EVENT, a[2]);
+    if (!obj) {
+        return NC_STATUS_INSUFFICIENT_RESOURCES;
+    }
+    nc_vm_wr32(k->vm, obj - OB_HEADER + 0x8, a[0]);
+    nc_vm_wr32(k->vm, a[3], obj);
+    return NC_STATUS_SUCCESS;
+}
+
+/* ObInsertObject(Object, ObjectAttributes, ObjectPointerBias, Handle): a handle to
+ * it, ObjectPointerBias more references */
+static uint64_t ObInsertObject(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    const uint32_t hdr = a[0] - OB_HEADER;
+    name_ignored(k, a[1], "ObInsertObject");
+    if (a[1] && (nc_vm_rd32(k->vm, a[1] + 8) & 0x10)) { /* OBJ_PERMANENT */
+        nc_vm_wr32(k->vm, hdr + 0xC, nc_vm_rd32(k->vm, hdr + 0xC) | 2);
+    }
+    const uint32_t h = nc_ob_handle(k, a[0], type_of(k, a[0]));
+    if (!h) {
+        return NC_STATUS_INSUFFICIENT_RESOURCES;
+    }
+    nc_vm_wr32(k->vm, hdr, nc_vm_rd32(k->vm, hdr) + a[2]);
+    nc_vm_wr32(k->vm, a[3], h);
+    return NC_STATUS_SUCCESS;
+}
+
+/* ObMakeTemporaryObject(Object): no longer permanent */
+static uint64_t ObMakeTemporaryObject(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    const uint32_t hdr = a[0] - OB_HEADER;
+    nc_vm_wr32(k->vm, hdr + 0xC, nc_vm_rd32(k->vm, hdr + 0xC) & ~2u);
+    return 0;
+}
+
 void nc_ob_register(NcKernel *k)
 {
     nc_kernel_impl(k, "NtClose", NtClose);
     nc_kernel_impl(k, "NtDuplicateObject", NtDuplicateObject);
+    nc_kernel_impl(k, "ObfReferenceObject", ObfReferenceObject);
+    nc_kernel_impl(k, "ObReferenceObjectByPointer", ObReferenceObjectByPointer);
+    nc_kernel_impl(k, "ObOpenObjectByPointer", ObOpenObjectByPointer);
+    nc_kernel_impl(k, "ObCreateObject", ObCreateObject);
+    nc_kernel_impl(k, "ObInsertObject", ObInsertObject);
+    nc_kernel_impl(k, "ObMakeTemporaryObject", ObMakeTemporaryObject);
 }
 
 void nc_ob_reset(void)

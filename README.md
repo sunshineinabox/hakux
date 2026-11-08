@@ -5,6 +5,8 @@ AMD64 (x86-64) Linux, with an experimental build for RetroArch on Android. It
 is based on [hakuX](https://github.com/rfandango/hakuX) and comes with
 [PortareOS](https://github.com/portare-ch/portareos) on the Retroid Pocket Nova.
 
+See the [game compatibility list](https://hakuxlr.portareos.org/) for per-title results.
+
 You need your own game images. To play games, you do not need a BIOS,
 MCPX ROM or Xbox hard disk image. hakuX creates its storage when you first
 start a game.
@@ -45,11 +47,13 @@ Back up your [saves](#saves) before changing versions.
 
 ### RetroArch on other Linux systems
 
-Install a 64-bit version of RetroArch with your distribution's package
-manager. You also need a GPU driver with Vulkan 1.3 (Vulkan 1.2 drivers use
-a compatibility path, which can be slower), the Vulkan loader
-(`libvulkan.so.1`) 1.3 or newer even with a 1.2 driver, glibc 2.38 or newer,
-libstdc++ from GCC 13 or newer, and zlib.
+Install 64-bit RetroArch and zlib. Vulkan 1.4 is recommended; 1.3 is
+also supported, and 1.2 works through a compatibility path that may be
+slower. The Vulkan loader (`libvulkan.so.1`) must support 1.3 or newer.
+
+The ARM64 core requires glibc 2.38+ and GCC 13's libstdc++. The AMD64 core
+requires glibc 2.35+ and GCC 11's libstdc++ (Ubuntu 22.04, Debian 12 or
+newer), plus the kernel and KVM requirements below.
 
 Download the archive that matches your CPU:
 
@@ -104,9 +108,15 @@ or `--core` to install a specific release or local build; see
 
 #### AMD64: set up KVM first
 
-The AMD64 build is experimental. It uses Linux KVM to run Xbox code on
-your CPU and requires TSC scaling and UMIP support. AMD Zen 2 and newer
-CPUs meet these requirements; on Intel, KVM can provide UMIP itself.
+The AMD64 build uses Linux KVM and requires kernel 5.16+, TSC scaling,
+and UMIP. AMD Zen 2 and newer CPUs meet the CPU requirements; Intel KVM
+can provide UMIP in software.
+
+**Ubuntu 22.04:** Its glibc is compatible, but the original 5.15 kernel
+is too old. Check with `uname -r` and use kernel 5.16 or newer. Ubuntu's
+HWE kernel (6.8 on 22.04.5) is suitable. Install it with
+`sudo apt install --install-recommends linux-generic-hwe-22.04`, then
+reboot. Some Desktop installations already have HWE.
 
 1. Enable **Intel VT-x** or **AMD SVM / AMD-V** in BIOS/UEFI.
 2. Load the KVM driver: `sudo modprobe kvm_intel` for Intel, or
@@ -135,7 +145,8 @@ KVM is ready, follow the
 
 The Android build is experimental and has seen little testing on devices.
 It needs a 64-bit (arm64-v8a) device with Android 9 or newer, a GPU driver
-with Vulkan 1.2 or newer (1.3 recommended), and RetroArch from the Play Store
+with Vulkan 1.2 or newer (1.4 recommended, 1.3 supported), and RetroArch
+from the Play Store
 or [retroarch.com](https://www.retroarch.com/?page=platforms).
 
 1. Download `hakux-<version>-android-arm64.zip` from the
@@ -159,16 +170,28 @@ problem.
 
 ## Game formats
 
-Supported formats are Xbox XISO images, full disc dumps (Redump) with the
-`.iso` extension, and DVD CHD images. To compress an ISO into a CHD:
+Supported formats are Xbox XISO images (`.iso`), full disc dumps (Redump
+ISO), and DVD CHDs (`.chd`). **Convert full Redump ISOs to XISO before
+creating a CHD.** Redump images include non-game partitions and padding;
+compressing them directly can produce a CHD larger than a bare XISO.
+
+The converter removes that overhead before CHD compression:
 
 ```sh
-chdman createdvd -i "Game.iso" -o "Game.chd"
+python3 tools/iso_to_chd.py "Game.iso"
+# Optional: also keep Game.xiso.iso
+python3 tools/iso_to_chd.py "Game.iso" --keep-xiso
 ```
 
-hakuX can read the resulting CHD directly. Use `createdvd` when converting:
-CD CHDs made with `createcd` and CHDs that depend on a parent image are not
-supported.
+Install [xdvdfs-cli](https://github.com/antangelo/xdvdfs) (the `xdvdfs`
+command) and [chdman](https://docs.mamedev.org/tools/chdman.html) first.
+The script runs `xdvdfs pack` followed by `chdman createdvd`; it keeps
+the input ISO and removes the intermediate XISO unless `--keep-xiso` is
+given. It refuses to overwrite existing files.
+
+An XISO is not a bit-for-bit Redump archive; preserve your original dump
+if you need one. hakuX reads the resulting CHD directly. CD CHDs made
+with `createcd` and CHDs that depend on a parent image are not supported.
 
 <a id="how-hakux-compares-with-xemu"></a>
 <a id="how-this-differs-from-upstream-hakux-and-xemu"></a>
@@ -218,6 +241,7 @@ take effect immediately.
 | Render Scale | The default is **2x**. Try **1x** if a game runs slowly. Higher values sharpen the picture but need more GPU power. |
 | Screen Format | Choose **Widescreen** for games that support it. Set RetroArch's aspect ratio to **Core provided**. |
 | Crop Overscan | On by default to hide borders around the picture. Turn it off to show the full frame. |
+| Combiner Precision | **Accurate** is the default on AMD64 Linux; **Fast** on ARM64 Linux and Android. Fast omits 9-bit combiner rounding to reduce GPU work. Restart the game after changing it. |
 | Audio Processing | Defaults to **Full DSP (experimental)**, which runs Xbox audio effects. Try **Fast** if audio crackles or a game runs slowly. |
 | Audio Resampler | Defaults to **Sinc**. Try **Linear** to reduce CPU use at the cost of some audio quality. |
 | Frame Pacing | Off by default (experimental). If a game runs slowly and the controls feel delayed, **On** holds the game to the pace the GPU draws at, so it can't run ahead of the picture. **Lowest Latency** waits one frame less but may lower the frame rate. |
@@ -283,5 +307,9 @@ game, as a new session may overwrite them:
 The emulator core and Android app are the work of the upstream hakuX
 contributors. This fork maintains the Linux and RetroArch integration.
 
-GNU GPL v3 or later ([COPYING](COPYING)). Third-party licenses are listed
-in [LICENSE](LICENSE) and [licenses/](licenses/).
+Upstream hakuX code is licensed under [GPL-3.0-or-later](COPYING).
+Original code from this fork marked `SPDX-License-Identifier: GPL-2.0-or-later`
+is also available under [GPL-2.0-or-later](licenses/GPL-2.0.txt).
+The combined hakuX-lr core is distributed under GPL-3.0-or-later.
+Third-party code keeps its own licenses, listed in [LICENSE](LICENSE)
+and [licenses/](licenses/).

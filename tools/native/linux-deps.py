@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Fetch/verify the pinned day-one sources without modifying external/fex."""
 import argparse
 import json

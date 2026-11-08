@@ -18,6 +18,7 @@
  * we ask again. The engine may be named (kai=HOST): looked up then.
  */
 #include "native/net/net.h"
+#include "native/core/libc_compat.h"
 #include "native/core/nc.h"
 
 #include <arpa/inet.h>

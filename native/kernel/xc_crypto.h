@@ -51,6 +51,16 @@ void nc_des_parity(uint8_t *key, size_t len);
 /* a = b^c mod d over n little-endian 32-bit words. False if d is zero. */
 bool nc_modexp(uint32_t *a, const uint32_t *b, const uint32_t *c, const uint32_t *d, unsigned n);
 
+/* The private-key operation on a BSAFE private key blob: "RSA2" (NC_XC_RSA2),
+ * keylen (modulus bytes with padding) 0x04, bitlen 0x08, datalen 0x0C, pubexp
+ * 0x10; at 0x14 the modulus (keylen bytes), then prime1, prime2, exponent1,
+ * exponent2 and the coefficient (keylen / 2 bytes each), then the private
+ * exponent (keylen bytes), all little-endian. out = in^d mod n, keylen bytes,
+ * from the primes, exponents and coefficient; in holds bitlen / 8. False for
+ * another blob, or an input not below the modulus. */
+#define NC_XC_RSA2 0x32415352u
+bool nc_xc_pk_private(const uint8_t *key, const uint8_t *in, uint8_t *out);
+
 /* A synthetic XePublicKeyData and signatures that verify with it
  * (xc_crypto.c). */
 #define NC_XC_PUBKEY_SIZE 0x11Cu /* BSAFE blob of a 2048-bit key */

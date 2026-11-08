@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Every command the back end records through its device table (T.vkCmd*)
  * goes through the strip batch's wrapper (vk/batch_wrap.h), which records
  * a held run of strips first: a command without one reaches the command

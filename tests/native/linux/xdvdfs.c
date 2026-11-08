@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Test directory lookup and listing on deep and looping XDVDFS trees. The
  * listing walks run on a small thread stack, so recursion would overflow it. */
 #include "native/core/xdvdfs.h"

@@ -1734,6 +1734,9 @@ void hle_pb_diag(void)
     unsigned objs;
     hle_pbd_counts(&clears, &swaps, &objs, &rt_uploads);
     hle_pbd_draw_counts(&draws, &ff, &skipped, &tex_defs);
+    unsigned tex_held;
+    uint64_t tex_held_bytes;
+    hle_pbd_tex_held(&tex_held, &tex_held_bytes);
     uint64_t vis_tests, vis_kicks;
     hle_pbd_vis_counts(&vis_tests, &vis_kicks);
     const HleDispStats ds = hle_disp_stats();
@@ -1782,7 +1785,7 @@ void hle_pb_diag(void)
                                               : g_pb.in_run       ? " (decoding)" : "";
     hle_log("hakuX-hle-pb", "kicks %u words %llu headers %llu methods %llu faults %u GET %08x "
             "PUT %08x binds %llu semaphores %llu flips %llu traps %llu (%s) runs %llu surfaces %u clears %llu "
-            "swaps %llu draws %llu ff %llu skipped %llu (%s) textures %llu rt uploads %llu blits %llu "
+            "swaps %llu draws %llu ff %llu skipped %llu (%s) textures %llu (%u held, %llu MiB) rt uploads %llu blits %llu "
             "m2mf %llu copies "
             "skipped %llu vis %llu (kicks %llu) overlays %llu repeats %llu const reuses %llu "
             "vb in place %llu copied %llu (barrier kicks %llu) unindexed %llu first writes %llu (armed %llu, waits %llu, "
@@ -1795,7 +1798,7 @@ void hle_pb_diag(void)
             (unsigned long long)g_pb.traps, tk + (tk[0] == ' '), (unsigned long long)g_pb.runs, objs,
             (unsigned long long)clears,
             (unsigned long long)swaps, (unsigned long long)draws, (unsigned long long)ff,
-            (unsigned long long)skipped, why + (why[0] == ' '), (unsigned long long)tex_defs,
+            (unsigned long long)skipped, why + (why[0] == ' '), (unsigned long long)tex_defs, tex_held, (unsigned long long)(tex_held_bytes >> 20),
             (unsigned long long)rt_uploads,
             (unsigned long long)g_pb.blits,
             (unsigned long long)g_pb.m2mfs, (unsigned long long)g_pb.copies_skipped,

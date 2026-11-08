@@ -1,6 +1,7 @@
 #include "hw/xbox/hle/shader/psh.h"
 #include "hw/xbox/hle/shader/ff.h"
 #include "hle_test.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,8 @@ static void dump(const char *name)
 #define R_T1   0x9
 #define R_R0   0xC
 #define R_R1   0xD
+#define R_V1   0x5
+#define R_SUM  0xE
 #define CH_A   0x10
 #define INVERT 0x20
 #define EXPAND 0x40
@@ -67,7 +70,8 @@ static void test_modulate(void)
     HT_CHECK(strstr(buf, "r0 = vec4(0.0, 0.0, 0.0, t0.a)") != NULL);
     k.specular = 1;                                     /* SPECULARENABLE: v1 + r0 */
     HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
-    HT_CHECK(strstr(buf, "clamp(v1.rgb + r0.rgb, 0.0, 1.0), fogf)") != NULL);
+    HT_CHECK(strstr(buf, "clamp(clamp(v1.rgb, 0.0, 1.0) + clamp(r0.rgb, 0.0, 1.0), 0.0, 1.0), "
+                         "fogf)") != NULL);
     /* no descriptor indexing: every array sized, nothing nonuniform */
     HT_CHECK(hle_glsl_fixed_slots(buf, sizeof(buf)) == strlen(buf));
     HT_CHECK(strstr(buf, "nonuniform") == NULL && strstr(buf, "[]") == NULL);
@@ -131,6 +135,7 @@ static void test_dot_mux(void)
     rs[HLE_PS_COUNT] = 2 | 0x100 | 0x1000;
     HlePshKey k;
     hle_psh_key(rs, &k);
+    k.precise = 1;
     unsigned un = 0;
     HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), &un) > 0);
     dump("psh_dot");
@@ -139,7 +144,7 @@ static void test_dot_mux(void)
     HT_CHECK(strstr(buf, "vec3 ab = vec3(dot(A, B))") != NULL);
     HT_CHECK(strstr(buf, "(2.0 * max(t0.rgb, 0.0) - 1.0)") != NULL);
     HT_CHECK(strstr(buf, "r1.a = ab.b;") != NULL);
-    HT_CHECK(strstr(buf, "ab = clamp((ab * 2.0), -1.0, 1.0);") != NULL);
+    HT_CHECK(strstr(buf, "ab = q9(clamp((ab * 2.0), -1.0, 1.0));") != NULL);
     HT_CHECK(strstr(buf, "bool mx = r0.a > 0.5;") != NULL);
     HT_CHECK(strstr(buf, "vec3 ms = mx ? cd : ab;") != NULL);
     HT_CHECK(strstr(buf, "col(pc.psc[1])") != NULL);    /* stage 1's own C0 */
@@ -148,8 +153,8 @@ static void test_dot_mux(void)
 }
 
 /* Halo 2's scope mask: r0.a = 0.5 - t0.b (HALFBIAS_NEGATE), then a MUX on
- * its MSB picks black (CD) where t0.b is 0: the bias's 0.5 is 0x80 / 0xFF
- * in shaders that MUX on the MSB, 0.5 in the others */
+ * its MSB picks black (CD) where t0.b is 0: the bias's 0.5 is 0x80 / 0xFF,
+ * in every shader */
 static void test_mux_bias(void)
 {
     uint32_t rs[HLE_PS_REGS] = { 0 };
@@ -161,6 +166,7 @@ static void test_mux_bias(void)
     rs[HLE_PS_COUNT] = 3 | 0x100;
     HlePshKey k;
     hle_psh_key(rs, &k);
+    k.precise = 1;
     HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
     dump("psh_mux_bias");
     HT_CHECK(strstr(buf, "float Ca = (-max(t0.b, 0.0) + (128.0 / 255.0));") != NULL);
@@ -173,10 +179,11 @@ static void test_mux_bias(void)
     rs[HLE_PS_RGB_IN + 1] = IN4(R_T0 | 0x80, R_ZERO | INVERT, R_ZERO, R_ZERO);  /* HALFBIAS_NORMAL */
     rs[HLE_PS_RGB_OUT + 1] = (R_R1 << 4) | (3u << 15);  /* SHIFTLEFT_1_BIAS */
     hle_psh_key(rs, &k);
+    k.precise = 1;
     HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
     HT_CHECK(strstr(buf, "ams = mx ? acd : aab;") != NULL);
     HT_CHECK(strstr(buf, "vec3 A = (max(t0.rgb, 0.0) - (128.0 / 255.0));") != NULL);
-    HT_CHECK(strstr(buf, "ab = clamp(((ab - (128.0 / 255.0)) * 2.0), -1.0, 1.0);") != NULL);
+    HT_CHECK(strstr(buf, "ab = q9(clamp(((ab - (128.0 / 255.0)) * 2.0), -1.0, 1.0));") != NULL);
     rs[HLE_PS_RGB_IN + 1] = 0;
     rs[HLE_PS_RGB_OUT + 1] = 0;
     rs[HLE_PS_ALPHA_IN + 2] = 0;
@@ -184,15 +191,18 @@ static void test_mux_bias(void)
     rs[HLE_PS_RGB_OUT + 2] = (R_T1 << 8) | 0x4000;
     rs[HLE_PS_COUNT] = 3;                               /* MUX on the LSB */
     hle_psh_key(rs, &k);
+    k.precise = 1;
     HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
-    HT_CHECK(strstr(buf, "float Ca = (-max(t0.b, 0.0) + 0.5);") != NULL);
+    HT_CHECK(strstr(buf, "float Ca = (-max(t0.b, 0.0) + (128.0 / 255.0));") != NULL);
+    HT_CHECK(strstr(buf, "bool mx = (int(floor(r0.a * 255.0 + 0.5)) & 1) == 1;") != NULL);
     rs[HLE_PS_COUNT] = 3 | 0x100;
     rs[HLE_PS_RGB_OUT + 2] = R_T1 << 8;                 /* no MUX: sum */
     rs[HLE_PS_ALPHA_OUT + 1] = (R_R0 << 8) | (1u << 15);   /* BIAS */
     hle_psh_key(rs, &k);
+    k.precise = 1;
     HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
-    HT_CHECK(strstr(buf, "float Ca = (-max(t0.b, 0.0) + 0.5);") != NULL);
-    HT_CHECK(strstr(buf, "ams = clamp((ams - 0.5), -1.0, 1.0);") != NULL);
+    HT_CHECK(strstr(buf, "float Ca = (-max(t0.b, 0.0) + (128.0 / 255.0));") != NULL);
+    HT_CHECK(strstr(buf, "ams = q9(clamp((ams - (128.0 / 255.0)), -1.0, 1.0));") != NULL);
 }
 
 /* PGR2's car paint: t0 normal map, t1/t2 DOTPRODUCT, t3 DOT_RFLCT_SPEC */
@@ -511,7 +521,8 @@ static void test_color_key(void)
 }
 
 /* colour sign: offset-binary channels mapped back, others as stored; a
- * bump stage takes its input's signed channels as they are */
+ * bump stage takes its input's signed channels as they are, back over 127
+ * (tsh), as dot products and dependent reads do */
 static void test_sign(void)
 {
     uint32_t rs[HLE_PS_REGS] = { 0 };
@@ -533,12 +544,30 @@ static void test_sign(void)
     HT_CHECK(strstr(buf, "t0.g = sgnob(t0.g);\n  t0.b = sgnob(t0.b);\n"
                          "  t0.a = sgnraw(t0.a);") != NULL);
     HT_CHECK(strstr(buf, "t1.r = sgnraw(t1.r);") != NULL);
-    HT_CHECK(strstr(buf, "* t0.bg;") != NULL);          /* already signed */
+    HT_CHECK(strstr(buf, "vec4 tsh(vec4 t, bvec4 m) { return mix(t, max(t * (255.0 / 254.0), "
+                         "-1.0), m); }") != NULL);
+    HT_CHECK(strstr(buf, "* tsh(t0, bvec4(false, true, true, true)).bg;") != NULL);
     HT_CHECK(strstr(buf, "sgn8(t0.bg)") == NULL);
+    HT_CHECK(strstr(buf, "vec3 A = max(t1.rgb, 0.0);") != NULL);     /* combiners: as decoded */
     k.sgn_ob = 0x4;                                     /* b only */
     k.sgn_raw = 0;
     HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
-    HT_CHECK(strstr(buf, "* vec2(t0.b, sgn8(t0.bg).y);") != NULL);
+    HT_CHECK(strstr(buf, "* vec2(tsh(t0, bvec4(false, false, true, false)).b, sgn8(t0.bg).y);")
+             != NULL);
+    /* a dot product and a dependent read of a signed t0 */
+    rs[HLE_PS_TEXMODES] = HLE_PST_PROJECT2D | HLE_PST_DOTPRODUCT << 5 | HLE_PST_DPNDNT_GB << 10;
+    hle_psh_key(rs, &k);
+    k.sgn_ob = 0x7;                                     /* t0 rgb */
+    HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
+    dump("psh_sign_dot");
+    HT_CHECK(strstr(buf, "dot1 = dot(vTex1.xyz, dmap(0u, tsh(t0, bvec4(true, true, true, false))));")
+             != NULL);
+    HT_CHECK(strstr(buf, "uSmp[nonuniformEXT(si)]), tsh(t0, bvec4(true, true, true, false)).gb); }")
+             != NULL);
+    k.sgn_ob = 0;                                       /* unsigned: as before */
+    HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
+    HT_CHECK(strstr(buf, "dot1 = dot(vTex1.xyz, dmap(0u, t0));") != NULL);
+    HT_CHECK(strstr(buf, "tsh") == NULL);
 }
 
 /* colour key on signed channels: compared as the guest stores them (an
@@ -747,6 +776,37 @@ static void test_dither(void)
     HT_CHECK(strstr(buf, "oColor = clamp(d * df - s * sf, 0.0, 1.0);") != NULL);
 }
 
+/* Polygon coverage adjusts alpha before the alpha test. */
+static void test_poly_smooth(void)
+{
+    uint32_t rs[HLE_PS_REGS] = { 0 };
+    rs[HLE_PS_RGB_IN] = IN4(R_V0, R_ZERO | INVERT, R_ZERO, R_ZERO);
+    rs[HLE_PS_RGB_OUT] = R_R0 << 4;
+    rs[HLE_PS_COUNT] = 1;
+    HlePshKey k;
+    hle_psh_key(rs, &k);
+    HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
+    HT_CHECK(strstr(buf, "gl_BaryCoordNoPerspEXT") == NULL);
+    HT_CHECK(strstr(buf, "GL_EXT_fragment_shader_barycentric") == NULL);
+    k.poly_smooth = 1;
+    k.alpha_test = 1;
+    k.alpha_func = 4;                                   /* GREATER */
+    k.tex_modes = HLE_PST_PROJECT2D;
+    k.alpha_kill = 1;                                   /* a discard before the coverage's use */
+    size_t n = hle_psh_glsl(&k, buf, sizeof(buf), NULL);
+    HT_CHECK(n > 0 && n == strlen(buf));
+    dump("psh_poly_smooth");
+    HT_CHECK(strstr(buf, "#extension GL_EXT_fragment_shader_barycentric : require\n") != NULL);
+    HT_CHECK(strstr(buf, "float(max((pc.flags >> 16) & 255u, 1u));") != NULL);
+    /* Compute derivatives before discards; apply coverage before alpha testing. */
+    const char *bc = strstr(buf, "vec3 bc = gl_BaryCoordNoPerspEXT, gx = dFdx(bc), gy = dFdy(bc);");
+    const char *kill = strstr(buf, "if (t0.a == 0.0) discard;");
+    const char *cv = strstr(buf, "outc.a *= pcov;");
+    const char *at = strstr(buf, "if (!(a > r)) discard;");
+    HT_CHECK(bc != NULL && kill != NULL && bc < kill);
+    HT_CHECK(cv != NULL && at != NULL && cv < at);
+}
+
 static void test_overflow(void)
 {
     uint32_t rs[HLE_PS_REGS] = { 0 };
@@ -756,9 +816,191 @@ static void test_overflow(void)
     HT_CHECK(hle_psh_glsl(&k, buf, 1024, NULL) == 0);
 }
 
+/* Check combiner rounding against Xbox reference captures in float32. */
+static float q9f(float x)
+{
+    return floorf(x * 255.0f + 0.500244140625f) / 255.0f;
+}
+
+static float clampf(float x, float lo, float hi)
+{
+    return x < lo ? lo : x > hi ? hi : x;
+}
+
+static float st(float v)                /* a stage's output: clamp, q9 */
+{
+    return q9f(clampf(v, -1.0f, 1.0f));
+}
+
+static unsigned unorm8(float x)         /* the target's conversion */
+{
+    return (unsigned)lrintf(clampf(x, 0.0f, 1.0f) * 255.0f);
+}
+
+static float sgn(int b)                 /* sgnob of an offset-binary texel */
+{
+    return fmaxf((((float)(b + 128) / 255.0f) * 255.0f - 128.0f) / 127.5f, -1.0f);
+}
+
+static float tshf(float x)              /* tsh: the texture shader's b / 127 */
+{
+    return fmaxf(x * (255.0f / 254.0f), -1.0f);
+}
+
+#define K(v)   ((float)(v) / 255.0f)
+#define HALFF  (128.0f / 255.0f)
+
+static void test_precision(void)
+{
+    uint32_t rs[HLE_PS_REGS] = { 0 };
+    rs[HLE_PS_RGB_IN] = IN4(R_C0, R_ZERO | INVERT, R_ZERO, R_ZERO);
+    rs[HLE_PS_RGB_OUT] = (R_R0 << 4) | (6u << 15);     /* r0 = C0 / 2 */
+    rs[HLE_PS_FINAL_ABCD] = IN4(R_ZERO, R_ZERO, R_ZERO, R_SUM);
+    rs[HLE_PS_FINAL_EFG] = IN4(R_ZERO, R_ZERO, R_R0 | CH_A, 0);
+    rs[HLE_PS_COUNT] = 1;
+    HlePshKey k;
+    hle_psh_key(rs, &k);
+    k.precise = 0;
+    HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
+    HT_CHECK(strstr(buf, "float q9(float x)") == NULL);
+    HT_CHECK(strstr(buf, "ab = clamp((ab * 0.5), -1.0, 1.0);") != NULL);
+    k.precise = 1;
+    HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
+    dump("psh_precision");
+    HT_CHECK(strstr(buf, "float q9(float x) { return floor(x * 255.0 + 0.500244140625) / 255.0; }")
+             != NULL);
+    HT_CHECK(strstr(buf, "ab = q9(clamp((ab * 0.5), -1.0, 1.0));") != NULL);
+    HT_CHECK(strstr(buf, "vec4 v1r0 = vec4(clamp(v1.rgb, 0.0, 1.0) + clamp(r0.rgb, 0.0, 1.0), "
+                         "0.0);") != NULL);
+    HT_CHECK(strstr(buf, "vec3 D = max(v1r0.rgb, 0.0);") != NULL);      /* up to 2 */
+    rs[HLE_PS_FINAL_EFG] = IN4(R_ZERO, R_ZERO, R_R0 | CH_A, 0xE0);
+    hle_psh_key(rs, &k);
+    k.precise = 1;
+    HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
+    HT_CHECK(strstr(buf, "vec4 v1r0 = vec4((1.0 - clamp(v1.rgb, 0.0, 1.0)) + "
+                         "(1.0 - clamp(r0.rgb, 0.0, 1.0)), 0.0);") != NULL);
+    HT_CHECK(strstr(buf, "v1r0 = clamp(v1r0, 0.0, 1.0);") != NULL);
+
+    /* Halving rounds up: 0x19 -> 13, 0xFF -> 128 (MSB set). */
+    HT_EQ_U32(unorm8(st(K(25) * 0.5f)), 13);
+    HT_EQ_U32(unorm8(st(K(63) * 0.5f)), 32);
+    HT_EQ_U32(unorm8(st(K(255) * 0.5f)), 128);
+    HT_CHECK(st(K(255) * 0.5f) > 0.5f);
+    /* A near-tie from 5-bit inputs must still round down to 60. */
+    const float t5 = (12.0f / 31.0f) * (19.0f / 31.0f);
+    HT_EQ_U32(unorm8(st(t5)), 60);
+    HT_EQ_U32((unsigned)(st(t5) * 255.0f + 0.5f) & 1u, 0);
+    /* Float32 error must not round a true tie down. */
+    HT_EQ_U32(unorm8(st(nextafterf(K(25) * 0.5f, 0.0f))), 13);
+    /* Check exact half-up behavior across 8-bit products and sums. */
+    unsigned bad = 0;
+    for (unsigned a = 0; a < 256; a++) {
+        for (unsigned c = 0; c < 256; c++) {
+            bad += (unsigned)(st(K(a) * K(c)) * 255.0f + 0.5f) != (2 * a * c + 255) / 510;
+            bad += (unsigned)(st(K(a) * K(c) * 0.5f) * 255.0f + 0.5f) != (a * c + 255) / 510;
+            const unsigned d = (a * 37 + c * 101) & 255, e = (a * 211 + c * 29 + 7) & 255;
+            const float s2 = st(K(a) * K(c) + K(d) * K(e));
+            const unsigned x2 = a * c + d * e;
+            bad += x2 <= 65025 && (unsigned)(s2 * 255.0f + 0.5f) != (2 * x2 + 255) / 510;
+        }
+    }
+    HT_EQ_U32(bad, 0);
+    /* Finer texture values can fall inside the float32 tie tolerance;
+     * Xbox register expansion remains unverified. */
+    const float nt = (4.0f / 31.0f) * (19.0f / 31.0f) + (2.0f / 15.0f) * (5.0f / 15.0f);
+    HT_EQ_U32(unorm8(st(nt)), 32);
+    HT_EQ_U32(unorm8(st(K(33) * K(156) + K(34) * K(85))), 32);
+    /* Combiners use signed /127.5; texture shader reads use /127. */
+    for (int v = -128; v < 128; v++) {
+        bad += fabsf(tshf(sgn(v)) - fmaxf((float)v / 127.0f, -1.0f)) > 1e-6f;
+    }
+    HT_EQ_U32(bad, 0);
+    HT_CHECK(tshf(sgn(127)) == 1.0f && tshf(sgn(-128)) == -1.0f && tshf(sgn(-127)) == -1.0f);
+    HT_EQ_U32(unorm8(st(K(255) - HALFF)), 127);
+    HT_EQ_U32(unorm8(st((K(255) - HALFF) * 2.0f)), 254);
+    /* SignedCombinerOps: 0xBF + (-0x1F) / 2 = 176, 0xBF + (-0x1F - 0.5) = 32 */
+    HT_EQ_U32(unorm8(st(K(191) + st(-K(31) * 0.5f))), 176);
+    HT_EQ_U32(unorm8(st(K(191) + st(-K(31) - HALFF))), 32);
+    /* InputMappings, map(r1) * 0x7F + 0x7F: HALFBIAS of -0x66 63, HALFBIAS_
+     * NEGATE 191, UNSIGNED_INVERT of 0xB2 165 (one rounding, not two) */
+    const float r1 = st(-K(102));
+    HT_EQ_U32(unorm8(st((fmaxf(r1, 0.0f) - HALFF) * K(127) + K(127))), 63);
+    HT_EQ_U32(unorm8(st((HALFF - fmaxf(r1, 0.0f)) * K(127) + K(127))), 191);
+    HT_EQ_U32(unorm8(st((1.0f - K(178)) * K(127) + K(127))), 165);
+    /* ShiftClamping: (0x5F + 0x5F - 0.5) * 2 = 124, (0xBF + 0xBF) / 2 = 191 */
+    HT_EQ_U32(unorm8(st((K(95) + K(95) - HALFF) * 2.0f)), 124);
+    HT_EQ_U32(unorm8(st((K(191) + K(191)) * 0.5f)), 191);
+    /* SpecularR0Sum: v1 + r0 of halves rounded each, 77 128 166; of a
+     * negative v1 (BIAS) r0's 63 */
+    const float r0h = st(K(127) * 0.5f);
+    HT_EQ_U32(unorm8(clampf(st(K(25) * 0.5f), 0, 1) + clampf(r0h, 0, 1)), 77);
+    HT_EQ_U32(unorm8(clampf(st(K(127) * 0.5f), 0, 1) + clampf(r0h, 0, 1)), 128);
+    HT_EQ_U32(unorm8(clampf(st(K(204) * 0.5f), 0, 1) + clampf(r0h, 0, 1)), 166);
+    HT_EQ_U32(unorm8(clampf(st(K(25) - HALFF), 0, 1) + clampf(st(K(191) - HALFF), 0, 1)), 63);
+    /* SpecularR0SumFlags: 0x7F * (1 + 1), the sum unclamped: 254 */
+    HT_EQ_U32(unorm8(K(127) * (1.0f + 1.0f)), 254);
+    /* SignedToUnsignedMapping, five stages: t0 0x66, t2 0x40, t3.b -0x20
+     * signed; r1 = t2 * t3.b, r1 = 4 r1 r0, r0 + r1: 102 (signed), 204
+     * (t3.b unsigned: 0); and t0 alone reads 0xCC, not 0xCD */
+    for (unsigned u = 0; u < 2; u++) {
+        float r0 = st(sgn(102) * 1.0f);
+        float r1a = st(u ? fmaxf(sgn(-32), 0.0f) : sgn(-32));
+        float r1 = st(sgn(64) * r1a);
+        r1 = st(r1 * r0 * 4.0f);
+        HT_EQ_U32(unorm8(st(r0 + r1)), u ? 204 : 102);
+    }
+}
+
+static void test_precision_mode(void)
+{
+    uint32_t rs[HLE_PS_REGS] = { 0 };
+    HlePshKey k;
+    HT_EQ_U32(sizeof(HlePshKey), 216);
+    HT_EQ_U32(offsetof(HlePshKey, precise), offsetof(HlePshKey, fb_op) + sizeof(uint16_t));
+    HT_EQ_U32(offsetof(HlePshKey, fb_const), 208);
+    hle_psh_set_precision(false);
+    hle_psh_key(rs, &k);
+    HT_EQ_U32(k.precise, 0);
+    hle_psh_set_precision(true);
+    hle_psh_key(rs, &k);
+    HT_EQ_U32(k.precise, 1);
+#if defined(__x86_64__) && !defined(__ANDROID__)
+    hle_psh_set_precision(true);
+#else
+    hle_psh_set_precision(false);
+#endif
+}
+
+/* Check shader output with GL-style clamp disabled and enabled. */
+static void test_gl_clamp(void)
+{
+    uint32_t rs[HLE_PS_REGS] = { 0 };
+    rs[HLE_PS_RGB_IN] = IN4(R_T0, R_T1, R_ZERO, R_ZERO);
+    rs[HLE_PS_ALPHA_IN] = IN4(R_T0 | CH_A, R_T1 | CH_A, R_ZERO, R_ZERO);
+    rs[HLE_PS_RGB_OUT] = R_R0 << 4;
+    rs[HLE_PS_ALPHA_OUT] = R_R0 << 4;
+    rs[HLE_PS_COUNT] = 1;
+    rs[HLE_PS_TEXMODES] = HLE_PST_PROJECT2D | HLE_PST_PROJECT2D << 5;
+    HlePshKey k;
+    hle_psh_key(rs, &k);
+    HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
+    /* Keep unclamped shader text stable for the disk cache. */
+    HT_CHECK(strstr(buf, "GLC") == NULL && strstr(buf, "GLT") == NULL);
+    HT_CHECK(strstr(buf, "  return texture(sampler2D(uTex2D[nonuniformEXT(ti)], uSmp[nonuniformEXT(si)]), uv);\n") != NULL);
+    k.tex_modes |= 3u << 20 | 4u << 23;                 /* t0 u and v, t1 w */
+    HT_CHECK(hle_psh_glsl(&k, buf, sizeof(buf), NULL) > 0);
+    dump("psh_gl_clamp");
+    HT_CHECK(strstr(buf, "const uint GLCLAMP = 0x023u;") != NULL);
+    HT_CHECK(strstr(buf, "#define GLC2(s, v) glc2(s, v)") != NULL);
+    HT_CHECK(strstr(buf, "textureGrad(t, glc2(s, v), dFdx(v), dFdy(v))") != NULL);
+    HT_CHECK(strstr(buf, "clamp(v.x, 0.0, 0.99999994)") != NULL);
+    HT_CHECK(strstr(buf, "GLT3(sampler3D(uTex3D[nonuniformEXT(ti)], uSmp[nonuniformEXT(si)]), s, uvw)") != NULL);
+}
+
 int main(void)
 {
     HT_RUN(test_modulate);
+    HT_RUN(test_gl_clamp);
     HT_RUN(test_final_fog);
     HT_RUN(test_dot_mux);
     HT_RUN(test_mux_bias);
@@ -776,6 +1018,9 @@ int main(void)
     HT_RUN(test_sign_color_key);
     HT_RUN(test_dither);
     HT_RUN(test_aa_control);
+    HT_RUN(test_poly_smooth);
     HT_RUN(test_overflow);
+    HT_RUN(test_precision_mode);
+    HT_RUN(test_precision);
     HT_DONE();
 }

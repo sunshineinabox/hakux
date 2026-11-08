@@ -5,7 +5,8 @@
  *
  * Public keys are BSAFE blobs: magic "RSA1", keylen 0x04 (modulus bytes with
  * padding), bitlen 0x08, datalen 0x0C, pubexp 0x10, modulus at 0x14
- * (little-endian). Numbers in XcModExp and signatures are little-endian too.
+ * (little-endian); private keys ("RSA2") go on from there (xc_crypto.h).
+ * Numbers in XcModExp and signatures are little-endian too.
  */
 #include "native/kernel/kernel.h"
 #include "native/kernel/xc_crypto.h"
@@ -190,6 +191,12 @@ static uint64_t XcPKEncPublic(NcKernel *k, NcFrame *f, const uint32_t *a)
     return pk_public(k, a[0], host(k, a[1]), host(k, a[2]));
 }
 
+/* XcPKDecPrivate(pbPrvKey, pbInput, pbOutput) -> 1, or 0 for a bad key or input */
+static uint64_t XcPKDecPrivate(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    return nc_xc_pk_private(host(k, a[0]), host(k, a[1]), host(k, a[2]));
+}
+
 /* XcVerifyPKCS1Signature(pbSig, pbPubKey, pbDigest): the signature decrypts to a
  * PKCS #1 type 1 block holding the SHA-1 digest. The block's byte order isn't
  * pinned down yet, so both orders are accepted and the match is logged. */
@@ -244,6 +251,7 @@ void nc_xc_register(NcKernel *k)
     nc_kernel_impl(k, "XcModExp", XcModExp);
     nc_kernel_impl(k, "XcPKGetKeyLen", XcPKGetKeyLen);
     nc_kernel_impl(k, "XcPKEncPublic", XcPKEncPublic);
+    nc_kernel_impl(k, "XcPKDecPrivate", XcPKDecPrivate);
     nc_kernel_impl(k, "XcVerifyPKCS1Signature", XcVerifyPKCS1Signature);
     nc_kernel_impl(k, "XcCryptService", XcCryptService);
     nc_kernel_impl(k, "XcUpdateCrypto", XcUpdateCrypto);

@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * hakuX HLE GPU — push-buffer mode's surface objects: which one a new one
  * replaces once the table is full (pb/pbdraw.c evict_slot), and which are

@@ -201,6 +201,10 @@ bool nc_thrd_state_load(NcRd *r, unsigned v)
         if (r->fail || t->state == NC_T_FREE) {
             return false;
         }
+        if (v < 3) {
+            /* the priority was the base: no boosts then (the RAM is loaded) */
+            nc_ke_priority_init(k, t, t->priority);
+        }
     }
     k->current = thread_at(k, refs.current);
     k->slice_thread = thread_at(k, refs.slice_thread);

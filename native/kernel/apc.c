@@ -186,7 +186,7 @@ void nc_apc_return(NcKernel *k, NcFrame *f)
     nc_frame_set_gpr(f, NC_EAX, STATUS_USER_APC);
 }
 
-bool nc_apc_queue(NcKernel *k, NcThread *t, const NcApc *a)
+bool nc_apc_queue(NcKernel *k, NcThread *t, const NcApc *a, int increment)
 {
     if (t->napcs == t->apc_cap) {
         const unsigned cap = t->apc_cap ? t->apc_cap * 2 : 16;
@@ -203,6 +203,7 @@ bool nc_apc_queue(NcKernel *k, NcThread *t, const NcApc *a)
         /* The wait ends with STATUS_USER_APC once the APCs ran (one in an
          * APC routine too: its chain goes on after). */
         t->state = NC_T_READY;
+        nc_ke_unwaited(k, t, increment);
         begin_ctx(k, t);
         k->resched = true;
     }
@@ -236,7 +237,7 @@ static uint64_t KeInsertQueueApc(NcKernel *k, NcFrame *f, const uint32_t *a)
     nc_vm_wr32(k->vm, a[0] + KA_ARG2, a[2]);
     p[KA_INSERTED] = 1;
     const NcApc apc = {.kapc = a[0]};
-    if (!nc_apc_queue(k, t, &apc)) {
+    if (!nc_apc_queue(k, t, &apc, (int32_t)a[3])) {
         p[KA_INSERTED] = 0;
         return 0;
     }
@@ -258,7 +259,7 @@ static uint64_t NtQueueApcThread(NcKernel *k, NcFrame *f, const uint32_t *a)
         return NC_STATUS_INVALID_HANDLE;
     }
     const NcApc apc = {.normal = a[1], .ctx = a[2], .a1 = a[3], .a2 = a[4]};
-    return nc_apc_queue(k, t, &apc) ? NC_STATUS_SUCCESS : NC_STATUS_NO_MEMORY;
+    return nc_apc_queue(k, t, &apc, 0) ? NC_STATUS_SUCCESS : NC_STATUS_NO_MEMORY;
 }
 
 /* NtUserIoApcDispatcher(ApcContext, IoStatusBlock, Reserved): the APC routine
@@ -274,10 +275,10 @@ static uint64_t NtUserIoApcDispatcher(NcKernel *k, NcFrame *f, const uint32_t *a
     return 0;
 }
 
-/* KeTestAlertThread(ProcessorMode) -> alerted: alerts aren't kept. */
+/* KeTestAlertThread(ProcessorMode) -> alerted (KeAlertThread), cleared */
 static uint64_t KeTestAlertThread(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
-    return 0;
+    return nc_ke_test_alert(k, a[0] & 0xff);
 }
 
 void nc_apc_register(NcKernel *k)

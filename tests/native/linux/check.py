@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Run positive/negative platform checks and generate copyright-free XISO fixtures."""
 import argparse
 import os

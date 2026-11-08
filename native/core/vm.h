@@ -56,6 +56,9 @@ void nc_vm_destroy(NcVm *vm);
 
 /* Map guest VA [va, va+len) onto physical [pa, pa+len). Page-aligned. */
 bool nc_vm_map(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len);
+/* Map a RAM alias outside rmap; physical-page protections reach it too.
+ * Unmapping the full range removes it. Return false if it cannot be mapped. */
+bool nc_vm_map_alias(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len);
 
 /* Write-protects (ro) or unprotects every guest mapping of physical page pa. */
 void nc_vm_protect_page(NcVm *vm, uint32_t pa, bool ro);

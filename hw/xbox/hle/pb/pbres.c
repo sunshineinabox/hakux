@@ -9,6 +9,8 @@
 #include "hw/xbox/hle/mem/barrier.h"
 #include "hw/xbox/hle/mem/guestmem.h"
 #include "hw/xbox/hle/pb/pbres.h"
+#include "hw/xbox/hle/pb/pvideo.h"
+#include "hw/xbox/hle/tex/etc2_enc.h"
 #include "hw/xbox/hle/tex/xdk_res.h"
 #include "hw/xbox/hle/tex/xg_swizzle.h"
 #include "hw/xbox/hle/vk/back.h"
@@ -169,6 +171,53 @@ static void dxt_volume(uint32_t xfmt, const uint8_t *s, uint32_t w, uint32_t h, 
     }
 }
 
+/* Whether any DXT1 block of n at s is in three-colour mode with a transparent
+ * texel (index 3): the ETC2 then needs punch-through alpha */
+static bool dxt1_punch(const uint8_t *s, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++, s += 8) {
+        const uint16_t c0 = s[0] | s[1] << 8, c1 = s[2] | s[3] << 8;
+        if (c0 > c1) {
+            continue;
+        }
+        const uint32_t idx = s[4] | s[5] << 8 | s[6] << 16 | (uint32_t)s[7] << 24;
+        for (unsigned k = 0; k < 32; k += 2) {
+            if (((idx >> k) & 3) == 3) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* One level of a DXT texture (w x h at s) as ETC2 (oxfmt, HLE_XFMT_ETC2_*)
+ * at out: each block decoded and encoded again, the same bytes */
+static void dxt_to_etc2(uint32_t xfmt, uint32_t oxfmt, const uint8_t *s, uint32_t w, uint32_t h,
+                        uint8_t *out)
+{
+    const unsigned bb = xfmt == HLE_XFMT_DXT1 ? 8 : 16;
+    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    uint32_t px[16];
+    for (uint32_t i = 0; i < bw * bh; i++, s += bb) {
+        dxt_block(xfmt, s, 0, 0, 4, 4, px);
+        switch (oxfmt) {
+        case HLE_XFMT_ETC2_RGB:
+            hle_etc2_rgb_block(px, out);
+            out += 8;
+            break;
+        case HLE_XFMT_ETC2_RGBA1:
+            hle_etc2_rgba1_block(px, out);
+            out += 8;
+            break;
+        default:
+            hle_eac_alpha_block(px, out);
+            hle_etc2_rgb_block(px, out + 8);
+            out += 16;
+            break;
+        }
+    }
+}
+
 /* Whether the back end samples a texture's texels as the guest stores them
  * (vk/draw.c tex_format), else they're converted on the way into the arena
  * (hle_tex_convert): R6G5B5, which Vulkan has no format for, and depth, read
@@ -196,34 +245,6 @@ static bool tex_native(uint32_t fmt)
     }
 }
 
-static uint8_t clip8(int v)
-{
-    return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
-}
-
-/* YUY2 / UYVY (BT.601 video range) -> B8G8R8A8, w x h texels: integer form
- * as xemu's convert_yuy2_to_rgb. */
-static void yuv_convert(const uint8_t *src, uint32_t pitch, uint32_t w, uint32_t h, bool uyvy,
-                        uint8_t *dst)
-{
-    for (uint32_t y = 0; y < h; y++) {
-        const uint8_t *l = src + y * pitch;
-        uint8_t *q = dst + y * w * 4;
-        for (uint32_t x = 0; x + 1 < w; x += 2, l += 4, q += 8) {
-            int y0 = (uyvy ? l[1] : l[0]) - 16, y1 = (uyvy ? l[3] : l[2]) - 16;
-            int u = (uyvy ? l[0] : l[1]) - 128, v = (uyvy ? l[2] : l[3]) - 128;
-            int yy[2] = { y0, y1 };
-            for (unsigned k = 0; k < 2; k++) {
-                int c = 298 * yy[k];
-                q[4 * k + 0] = clip8((c + 516 * u + 128) >> 8);
-                q[4 * k + 1] = clip8((c - 100 * u - 208 * v + 128) >> 8);
-                q[4 * k + 2] = clip8((c + 409 * v + 128) >> 8);
-                q[4 * k + 3] = 255;
-            }
-        }
-    }
-}
-
 /* A YUY2 / UYVY texture's texels converted to A8R8G8B8 into the arena as
  * object id's image (HLE_OP_TEX), sent as a linear A8R8G8B8 texture (texel
  * coordinates like the source); false if they can't be. */
@@ -241,7 +262,7 @@ static bool yuv_define(uint32_t id, const uint32_t h5[5], const HleResDesc *d)
     if (off == HLE_ARENA_FULL) {
         return false;
     }
-    yuv_convert(src, pitch, d->w, d->h, d->fmt == HLE_XFMT_UYVY, dst);
+    hle_pvideo_convert(src, pitch, d->w, d->h, d->fmt == HLE_XFMT_UYVY, NULL, dst);
     if (g_lg.yuv++ < 4) {               /* movies: when their frames start converting */
         hle_log("hakuX-hle-front", "YUV texture %u: %ux%u %s converted (#%u of 4 logged)", id,
                 d->w, d->h, d->fmt == HLE_XFMT_UYVY ? "UYVY" : "YUY2", g_lg.yuv);
@@ -291,7 +312,8 @@ static bool tex_desc(const uint32_t h5[5], HleResDesc *dp, HleResInfo *rip)
  * unswizzled or converted into the arena as object id's image (HLE_OP_TEX);
  * false if they can't be (format, memory, arena). */
 static bool tex_define(uint32_t id, const uint32_t h5[5], const HleResDesc *dp,
-                       const HleResInfo *rip, const uint32_t *pal, uint32_t npal, uint32_t sign)
+                       const HleResInfo *rip, const uint32_t *pal, uint32_t npal, uint32_t sign,
+                       uint32_t *host_bytes)
 {
     const HleResDesc d = *dp;
     const HleResInfo ri = *rip;
@@ -321,11 +343,30 @@ static bool tex_define(uint32_t id, const uint32_t h5[5], const HleResDesc *dp,
      * one slice); a volume's levels are depth slices (3D swizzle, or DXT
      * blocks in groups of four slices), depth halving per level */
     bool vol = d.kind == HLE_RK_VOLUME;
-    bool dxtd = (fi->flags & HLE_FI_DXT) && (vol || !g_hvk.caps.bc);
+    /* ... or, without BC, as ETC2 of the same bytes (caps.dxt_etc2): DXT1 as
+     * RGB, or RGB A1 where a block has a transparent texel; DXT3/5 as RGBA */
+    bool etc = (fi->flags & HLE_FI_DXT) && !vol && g_hvk.caps.dxt_etc2;
+    bool dxtd = (fi->flags & HLE_FI_DXT) && !etc && (vol || !g_hvk.caps.bc);
+    uint32_t etc_fmt = 0;
+    if (etc) {
+        etc_fmt = d.fmt == HLE_XFMT_DXT1 ? HLE_XFMT_ETC2_RGB : HLE_XFMT_ETC2_RGBA;
+        const uint32_t nf = d.kind == HLE_RK_CUBE ? 6 : 1, nl = MAX(ri.levels, 1u);
+        for (uint32_t f = 0; etc_fmt == HLE_XFMT_ETC2_RGB && f < nf; f++) {
+            for (uint32_t l = 0; l < nl; l++) {
+                uint32_t pitch;
+                const uint32_t w = MAX(d.w >> l, 1u), h = MAX(d.h >> l, 1u);
+                if (dxt1_punch(src + hle_res_subresource(&d, f, l, &pitch), (w + 3) / 4 * ((h + 3) / 4))) {
+                    etc_fmt = HLE_XFMT_ETC2_RGBA1;
+                    break;
+                }
+            }
+        }
+    }
     /* a format the back end doesn't sample as stored: A8R8G8B8 as well, or
      * depth as a float (hle_tex_convert), a linear texture a linear one */
-    bool conv = !p8 && !dxtd && !tex_native(d.fmt);
-    uint32_t oxfmt = p8 || dxtd ? HLE_XFMT_A8R8G8B8 : conv ? hle_tex_conv_xfmt(d.fmt) : d.fmt;
+    bool conv = !p8 && !dxtd && !etc && !tex_native(d.fmt);
+    uint32_t oxfmt = p8 || dxtd ? HLE_XFMT_A8R8G8B8 : etc ? etc_fmt :
+                     conv ? hle_tex_conv_xfmt(d.fmt) : d.fmt;
     const HleFmtInfo *ofi = hle_fmt_info(oxfmt);
     /* colour sign: those 8-bit channels offset binary (the texels as stored,
      * not a conversion's) */
@@ -363,7 +404,9 @@ static bool tex_define(uint32_t id, const uint32_t h5[5], const HleResDesc *dp,
                 orow = w * fi->bpp / 8;
                 out = raw = g_malloc((size_t)orow * h * dd);
             }
-            if (dxtd && !vol) {
+            if (etc) {
+                dxt_to_etc2(d.fmt, oxfmt, s, w, h, dst + pos);
+            } else if (dxtd && !vol) {
                 dxt_volume(d.fmt, s, w, h, 1, (uint32_t *)(dst + pos));
             } else if (vol) {
                 if (dxtd) {
@@ -435,6 +478,7 @@ static bool tex_define(uint32_t id, const uint32_t h5[5], const HleResDesc *dp,
             hle_log("hakuX-hle-front", "texdump %s (%u bytes)", p, total);
         }
     }
+    *host_bytes = total;
     HleCmdTex *c = hle_fe_begin(HLE_OP_TEX, sizeof(*c));
     c->id = id;
     c->xfmt = oxfmt;
@@ -458,23 +502,26 @@ uint32_t hle_draw_tex_bytes(const uint32_t h5[5])
 }
 
 uint32_t hle_draw_tex_define(uint32_t id, const uint32_t h5[5], const uint32_t *pal, uint32_t npal,
-                             uint32_t sign, uint32_t *bytes)
+                             uint32_t sign, uint32_t *bytes, uint32_t *host_bytes)
 {
     HleResDesc d;
     HleResInfo ri;
+    *host_bytes = 0;
     if (!tex_desc(h5, &d, &ri)) {
         return 0;
     }
     *bytes = ri.bytes;
     if (d.fmt == HLE_XFMT_YUY2 || d.fmt == HLE_XFMT_UYVY) {
+        *host_bytes = d.w * d.h * 4;
         return yuv_define(id, h5, &d) ? id : 0;        /* movies: converted to A8R8G8B8 */
     }
-    return tex_define(id, h5, &d, &ri, pal, npal, sign) ? id : 0;
+    return tex_define(id, h5, &d, &ri, pal, npal, sign, host_bytes) ? id : 0;
 }
 
 /* The overlay is not a texture object: the video decoder rewrites it every
  * frame and the back end keeps its own image (HleCmdOverlay). */
-uint32_t hle_draw_overlay_upload(const uint32_t h5[5], uint32_t *w, uint32_t *h)
+uint32_t hle_draw_overlay_upload(const uint32_t h5[5], const HlePvideoColor *color, uint32_t *w,
+                                 uint32_t *h)
 {
     HleResDesc d;
     HleResInfo ri;
@@ -488,7 +535,8 @@ uint32_t hle_draw_overlay_upload(const uint32_t h5[5], uint32_t *w, uint32_t *h)
     uint8_t *dst;
     uint32_t off = src ? arena_alloc(d.w * d.h * 4, 16, &dst) : HLE_ARENA_FULL;
     if (off != HLE_ARENA_FULL) {
-        yuv_convert(src, pitch, d.w, d.h, d.fmt == HLE_XFMT_UYVY, dst);
+        hle_pvideo_convert(src, pitch, d.w, d.h, d.fmt == HLE_XFMT_UYVY,
+                           hle_pvideo_color_default(color) ? NULL : color, dst);
         *w = d.w;
         *h = d.h;
     }

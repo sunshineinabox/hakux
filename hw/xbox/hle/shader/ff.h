@@ -120,7 +120,7 @@ typedef struct HleFfStage {
     uint32_t colorop, colorarg0, colorarg1, colorarg2;
     uint32_t alphaop, alphaarg0, alphaarg1, alphaarg2;
     uint32_t resultarg;
-    uint8_t texture;                  /* a texture is bound to this stage */
+    uint8_t texture;                  /* Bit 0 marks a bound texture. Bits 1–3 mark U, V, and W clamp axes. */
     uint8_t tex_dim;                  /* 2 = 2D, 3 = cube, 4 = volume */
     uint8_t alpha_kill;               /* D3DTSS_ALPHAKILL: texel alpha 0 discards */
     uint8_t unset;                    /* no texture set (D3D's Textures[stage] NULL): an
@@ -149,6 +149,7 @@ typedef struct HleFfPsKey {
                                          its pixel as the earlier draws left it (uFb),
                                          as the NV2A's texture unit reads the memory
                                          the draw renders */
+    uint8_t poly_smooth;              /* Polygon smoothing (HLE_POLY_COVER_GLSL). */
 } HleFfPsKey;
 
 /* Push constants (std430 layout, <= 256 bytes: 256 used); HLE_PUSH_GLSL
@@ -315,6 +316,17 @@ static inline const char *hle_push_glsl(void)
     (((fb) & HLE_FB_ZEQ16) ? \
      "  if (" z " < subpassLoad(uZ).r - 2.0 / 65535.0) discard;\n" : \
      "  if (" z " < subpassLoad(uZ).r - 4.0 / 16777215.0) discard;\n")
+
+/* Measure triangle coverage in guest pixels before any discard,
+ * so fragment derivatives remain defined. */
+#define HLE_BARY_EXT_GLSL "#extension GL_EXT_fragment_shader_barycentric : require\n"
+#define HLE_POLY_COVER_GLSL \
+    "  float pcov;\n" \
+    "  { vec3 bc = gl_BaryCoordNoPerspEXT, gx = dFdx(bc), gy = dFdy(bc);\n" \
+    "    vec3 d = bc * inversesqrt(max(gx * gx + gy * gy, vec3(1e-20))) /\n" \
+    "             float(max((pc.flags >> 16) & 255u, 1u));\n" \
+    "    vec3 cv = clamp(d + 0.5, 0.0, 1.0);\n" \
+    "    pcov = cv.x * cv.y * cv.z; }\n"
 
 /* NV2A's projective texture division: coordinates times 1/q, with 1/0 the
  * largest float and 0 times it 0, so q = 0 projects (0, 0, 0) to 0, never

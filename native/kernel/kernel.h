@@ -30,6 +30,8 @@ extern "C" {
 /* In the KPCR's page, past its fields (guest code reads it at fs:): 1 while
  * DPCs are queued (timer.c), for the guest-code KfLowerIrql (kernel.c). */
 #define NC_KPCR_DPC_PENDING 0x800u
+/* Further in that page: PsSetCreateThreadNotifyRoutine's 8 routines (ps.c). */
+#define NC_KPCR_THREAD_NOTIFY 0x840u
 #define NC_KORDINAL_MAX  512u
 #define NC_KORDINAL_THREAD_RETURN 0x3FFu  /* a thread's start routine returned */
 #define NC_KORDINAL_DPC_RETURN    0x3FEu  /* a DPC routine returned */
@@ -41,6 +43,7 @@ extern "C" {
 #define NC_KORDINAL_SEH_NESTED    0x3F8u  /* the kernel's handler around a handler call */
 #define NC_KORDINAL_SEH_COLLIDED  0x3F7u  /* the same, during an unwind */
 #define NC_KORDINAL_APU_SPIN      0x3F5u  /* DirectSound waits on the GP DSP's mailbox (fixups.c) */
+#define NC_KORDINAL_CONT_RETURN   0x3F6u  /* a kernel continuation goes on (nc_kernel_callout_cont) */
 
 enum NcKAbi { NC_KABI_STDCALL, NC_KABI_FASTCALL, NC_KABI_CDECL, NC_KABI_DATA };
 
@@ -71,7 +74,7 @@ typedef uint64_t (*NcKFn)(NcKernel *k, NcFrame *f, const uint32_t *args);
 
 /* Guest object types: the VA of the kernel's type-object data export. */
 enum NcObType { NC_OB_THREAD, NC_OB_EVENT, NC_OB_SEMAPHORE, NC_OB_MUTANT, NC_OB_TIMER, NC_OB_FILE,
-                NC_OB_DEVICE, NC_OB_SYMLINK, NC_OB_DIRECTORY, NC_OB_TYPES };
+                NC_OB_DEVICE, NC_OB_SYMLINK, NC_OB_DIRECTORY, NC_OB_IO_COMPLETION, NC_OB_TYPES };
 
 #define NC_MAX_THREADS 128
 /* The Xbox kernel's handle table grows as it fills. Super Monkey Ball
@@ -332,6 +335,8 @@ void nc_paging_flush(NcKernel *k);
 bool nc_paging_fault(NcKernel *k, uint32_t va);
 /* " ret ret ...": up to six return addresses up the guest's EBP frames. */
 void nc_kernel_frame_chain(NcKernel *k, NcFrame *f, char *buf, size_t len);
+/* ex.c: the guest's string at va in buf, as far as its pages are mapped. */
+const char *nc_kernel_guest_str(NcKernel *k, uint32_t va, char *buf, size_t len);
 
 /* Allocates an object (OBJECT_HEADER + zeroed body) and returns the body VA. */
 /* ObfDereferenceObject: an object no one holds any more is freed (ob.c). */
@@ -355,6 +360,9 @@ void nc_ps_yield(NcKernel *k);
 /* debug (debug.hakux.ncresume=<id>): NtResumeThread on thread t<id> */
 void nc_ps_debug_resume(NcKernel *k, unsigned id);
 void nc_ps_terminate_current(NcKernel *k, uint32_t status);
+/* A thread's start routine returned (f at the stub): it ends as
+ * PsTerminateSystemThread(STATUS_SUCCESS) ends it. */
+void nc_ps_thread_returned(NcKernel *k, NcFrame *f);
 
 bool nc_ps_stack_alloc(NcKernel *k, uint32_t size, uint32_t *base);
 /* The stack at base (size bytes, its pages gone) gives its slot back. */
@@ -373,11 +381,23 @@ static inline uint32_t nc_ps_frame_top(const NcThread *t)
     return t->frame_top ? t->frame_top : t->stack_base;
 }
 
+/* ex.c: ExAllocatePool and ExFreePool. */
+uint32_t nc_ex_alloc(NcKernel *k, uint32_t size);
+void nc_ex_free(NcKernel *k, uint32_t p);
 /* mm.c, ex.c, rtl.c */
 void nc_mm_register(NcKernel *k);
+/* Reserve the page-frame database and GPU instance pages at boot. */
+bool nc_mm_hold_top(NcKernel *k);
 void nc_mm_note_image(uint32_t base, uint32_t size);
 void nc_ex_register(NcKernel *k);
 void nc_rtl_register(NcKernel *k);
+/* rtlstr.c: the runtime library's strings, numbers and formatted output. */
+void nc_rtlstr_register(NcKernel *k);
+/* rtl.c: a pool block for a string's buffer, freed by RtlFree*String (or 0). */
+uint32_t nc_rtl_str_alloc(NcKernel *k, uint32_t size);
+/* misc.c: interlocked lists, port I/O buffers, the debugger's and bug
+ * checks' exports. */
+void nc_misc_register(NcKernel *k);
 /* Room for len bytes of guest code in the kernel area (stubs), or 0. */
 uint32_t nc_kernel_code_alloc(NcKernel *k, uint32_t len);
 
@@ -475,16 +495,41 @@ uint32_t nc_mm_contig_alloc(NcKernel *k, uint32_t size);
 
 /* ke.c: time, dispatcher objects and waits. */
 void nc_ke_register(NcKernel *k);
-/* KeSetEvent on a guest event object; returns the previous state. */
-uint32_t nc_ke_set_event(NcKernel *k, uint32_t event);
+/* KeSetEvent on a guest event object with a waiter's boost (increment: an
+ * I/O's completion gives 1); returns the previous state. */
+uint32_t nc_ke_set_event(NcKernel *k, uint32_t event, int increment);
 /* KeClearEvent. */
 void nc_ke_clear_event(NcKernel *k, uint32_t event);
 /* KeInitializeEvent: type 0 notification, 1 synchronization. */
 void nc_ke_init_event(NcKernel *k, uint32_t event, unsigned type, bool signaled);
+/* Kernel queues (KQUEUE, an I/O completion port's body): KeInitializeQueue;
+ * KeInsertQueue / KeInsertHeadQueue (a waiter takes the entry), returning the
+ * old depth; KeRemoveQueue for the running thread, returning the entry or a
+ * status (STATUS_TIMEOUT), or blocking (the entry comes as the wait's result,
+ * see nc_kernel_wait_cont); the entries queued. */
+void nc_ke_queue_init(NcKernel *k, uint32_t q, uint32_t count);
+uint32_t nc_ke_queue_insert(NcKernel *k, uint32_t q, uint32_t entry, bool at_head);
+uint32_t nc_ke_queue_remove(NcKernel *k, uint32_t q, uint32_t timeout_va);
+int32_t nc_ke_queue_depth(NcKernel *k, uint32_t q);
+/* The running thread waits for one object, forever, not alertable: its
+ * status, or (blocked) nc_kernel_wait_cont's. */
+uint32_t nc_ke_wait_one(NcKernel *k, uint32_t obj);
+/* KeAlertThread for t and mode (0 kernel, 1 user): returns the old alert. */
+bool nc_ke_alert(NcKernel *k, NcThread *t, unsigned mode);
+/* KeTestAlertThread: the running thread's alert for mode, cleared. */
+bool nc_ke_test_alert(NcKernel *k, unsigned mode);
 /* The running thread waits for the host's work for its call (no object, no
  * timeout); nc_ke_wake ends it with the call's status. */
 void nc_ke_block(NcKernel *k);
-void nc_ke_wake(NcKernel *k, NcThread *t, uint32_t status);
+void nc_ke_wake(NcKernel *k, NcThread *t, uint32_t status, int increment);
+/* Priority boosts (ke.c): a thread's base priority (KTHREAD.BasePriority);
+ * its priority and base set together (a new thread's, a kernel thread's);
+ * what a wait's end does to its priority and quantum, with the releaser's
+ * increment (KiUnwaitThread), and its quantum's end (one down to the base). */
+int nc_ke_base_priority(NcKernel *k, const NcThread *t);
+void nc_ke_priority_init(NcKernel *k, NcThread *t, int priority);
+void nc_ke_unwaited(NcKernel *k, NcThread *t, int increment);
+void nc_ke_quantum_end(NcKernel *k, NcThread *t);
 
 /* FILE_OBJECT.Event (a KEVENT): what a wait on a file handle waits for, set
  * when an I/O on the file issued without an event of its own completes. */
@@ -595,6 +640,13 @@ void nc_dpc_return(NcKernel *k);
 
 /* io.c: files, devices and the object namespace. */
 void nc_io_register(NcKernel *k);
+/* iomgr.c: IRPs, drivers, device queues and I/O completion ports. */
+void nc_iomgr_register(NcKernel *k);
+/* FileCompletionInformation: file object fo's completion port (a handle) and key. */
+uint32_t nc_iomgr_file_port(NcKernel *k, uint32_t fo, uint32_t port_handle, uint32_t key);
+/* An I/O on fo completed: with a completion port and an ApcContext, a packet
+ * for NtRemoveIoCompletion. */
+void nc_iomgr_file_post(NcKernel *k, uint32_t fo, uint32_t apc_ctx, uint32_t status, uint32_t info);
 /* xc.c: crypto exports. */
 void nc_xc_register(NcKernel *k);
 /* Where the hard disk's partitions live on the host (PartitionN under it). */
@@ -617,6 +669,9 @@ void nc_io_set_launch_dir(const char *dir);
 void nc_io_set_device_time(bool on);
 /* A file object's handle closed (ob.c). */
 void nc_io_close(NcKernel *k, uint32_t object);
+/* An IRP to one of the kernel's own devices (no driver): done in the call;
+ * the status, *info the bytes moved (iomgr.c's IofCallDriver). */
+uint32_t nc_io_device_irp(NcKernel *k, uint32_t dev, uint32_t irp, uint32_t sp, uint32_t *info);
 /* Completes the overlapped disc reads the reader thread finished (cheap when
  * none did): on every kernel entry and in the scheduler's loop. */
 void nc_io_poll(NcKernel *k);
@@ -634,11 +689,41 @@ void nc_kernel_callout(NcKernel *k, NcFrame *f, uint32_t routine, const uint32_t
 void nc_kernel_callout_at_irql(NcKernel *k, NcFrame *f, uint32_t routine, const uint32_t *args, unsigned nargs,
                                uint8_t irql);
 
+/* Kernel continuations: a kernel call that goes on in the kernel after a
+ * guest routine it runs returns, or after a wait. Its state is a record on
+ * the guest stack under the call's frame (so savestates keep it), which EBX
+ * points at while the routine runs (callee-saved, the routine keeps it):
+ * the continuation's id, the call's stack pop, the caller's EBX and
+ * NC_KCONT_WORDS words of the continuation's own. The continuation runs as
+ * the kernel call did (it may make another callout, wait or return), with
+ * the routine's EAX or the wait's status. */
+#define NC_KCONT_WORDS 6
+enum NcKContId {
+    NC_KCONT_IRP_COMPLETE,      /* iomgr.c: IofCompleteRequest's completion routines */
+    NC_KCONT_IRP_CALLED,        /* iomgr.c: a driver's dispatch routine returned */
+    NC_KCONT_IRP_WAITED,        /* iomgr.c: a synchronous request's wait ended */
+    NC_KCONT_START_IO,          /* iomgr.c: a driver's StartIo returned */
+    NC_KCONT_IO_REMOVE,         /* iomgr.c: NtRemoveIoCompletion's wait ended */
+    NC_KCONT_THREAD_NOTIFY,     /* ps.c: a thread notify routine returned */
+    NC_KCONT_MAX
+};
+typedef uint64_t (*NcKCont)(NcKernel *k, NcFrame *f, uint32_t eax, const uint32_t *ctx);
+void nc_kernel_cont(enum NcKContId id, NcKCont fn);
+/* From a kernel call or a continuation: runs routine(args...) at irql (0xFF:
+ * the current one), then continuation id with ctx. */
+void nc_kernel_callout_cont(NcKernel *k, NcFrame *f, uint32_t routine, const uint32_t *args, unsigned nargs,
+                            uint8_t irql, enum NcKContId id, const uint32_t ctx[NC_KCONT_WORDS]);
+/* From a kernel call or a continuation whose thread now waits (its wait set
+ * up, NC_T_WAITING): the wait's status goes to continuation id with ctx. */
+void nc_kernel_wait_cont(NcKernel *k, NcFrame *f, enum NcKContId id, const uint32_t ctx[NC_KCONT_WORDS]);
+/* After a state's load: the stubs a state saved by an older build lacks. */
+void nc_kernel_stubs_refresh(NcKernel *k);
+
 /* apc.c: asynchronous procedure calls. */
 void nc_apc_register(NcKernel *k);
 bool nc_apc_pending(const NcThread *t);
-/* Queues an APC to t; one waiting alertably wakes to run it. */
-bool nc_apc_queue(NcKernel *k, NcThread *t, const NcApc *a);
+/* Queues an APC to t; one waiting alertably wakes to run it, boosted by increment. */
+bool nc_apc_queue(NcKernel *k, NcThread *t, const NcApc *a, int increment);
 /* From an alertable wait of the running thread: run its APCs first, then
  * continue at final_eip/final_esp with STATUS_USER_APC. */
 bool nc_apc_begin_frame(NcKernel *k, NcFrame *f, NcThread *t, uint32_t final_esp, uint32_t final_eip);

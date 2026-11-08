@@ -43,6 +43,11 @@ typedef struct HleCaps {
      * off by name ("-bc,-vids,..."): any device runs the substitutes. */
     bool bc;                    /* BC1-3 sampled: DXT uploaded as is, else decoded to
                                    A8R8G8B8 on the way into the arena (pb/pbres.c) */
+    bool etc2;                  /* ETC2 sampled (Mali, PowerVR, Adreno) */
+    bool dxt_etc2;              /* ... and DXT is encoded again as ETC2 on the way into
+                                   the arena, the bytes of the DXT (tex/etc2_enc.h): on
+                                   without BC; HAKUX_HLE_DXT_ETC2=0 (or debug.hakux.
+                                   dxt_etc2=0) off, =1 on with BC too */
     bool vids;                  /* VK_EXT_vertex_input_dynamic_state, else the vertex
                                    layout is in the pipeline (vk/draw.c PipeKey.vi) */
     bool push;                  /* the push block (HleFfPush) fits the push constants,
@@ -103,6 +108,10 @@ typedef struct HleCaps {
     bool wide_lines;            /* enabled when present: lines as wide as SET_LINE_WIDTH
                                    times the resolution scale (vk/draw.c), else 1.0
                                    (Turnip on the Adreno 650 has none) */
+    bool fill_modes;            /* Non-solid polygon modes. */
+    bool logic_op;              /* logicOp: SET_LOGIC_OP (vk/draw.c) */
+    bool smooth_lines;          /* Vulkan smooth-line rasterization. */
+    bool bary;                  /* Barycentric coordinates for polygon smoothing. */
     bool cache_control;         /* pipelineCreationCacheControl: a pipeline asked of the
                                    cache only (vk/draw.c, asynchronous builds) */
     bool swapchain;             /* the Android surface and VK_KHR_swapchain: the window's
@@ -135,6 +144,8 @@ extern HleVk g_hvk;
  * Vulkan 1.1 is the floor's version: 1.2's and 1.3's parts come from their
  * extensions (timeline semaphores required) or vk/compat.c. */
 int hle_vk_init(void);
+/* Request Vulkan 1.4 if available, otherwise 1.3. */
+uint32_t hle_vk_instance_version(void);
 /* hle_vk_init on a frontend's instance (the libretro core): gpu, or the first
  * one when VK_NULL_HANDLE; a queue that can present to surface if it isn't
  * VK_NULL_HANDLE; the device made by make, as vkCreateDevice would (the

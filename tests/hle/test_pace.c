@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The frame pace's arithmetic (pb/pace.h): the swap the decoder waits for,
  * and how far it runs ahead of the GPU, across the ring's wrap. */
 #include "hw/xbox/hle/pb/pace.h"

@@ -15,7 +15,9 @@ find_package(Threads REQUIRED)
 add_library(nc_platform INTERFACE)
 target_link_libraries(nc_platform INTERFACE Threads::Threads ${CMAKE_DL_LIBS})
 if(ANDROID)
-  target_link_libraries(nc_platform INTERFACE android log)
+  # aaudio: the communicator's microphone and speaker (dev/xblc.c), in every
+  # Android build, the libretro core's too
+  target_link_libraries(nc_platform INTERFACE android log aaudio)
 elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|x86_64|AMD64)$")
   message(FATAL_ERROR "The native core requires Android arm64, or Linux on AArch64 or x86-64")
 endif()
@@ -144,6 +146,8 @@ add_library(hakux_native STATIC
   kernel/paging.c
   kernel/ex.c
   kernel/rtl.c
+  kernel/rtlstr.c
+  kernel/rtl_text.c
   kernel/seh.c
   kernel/fixups.c
   kernel/x86mmio.c
@@ -151,6 +155,8 @@ add_library(hakux_native STATIC
   kernel/intr.c
   kernel/apc.c
   kernel/io.c
+  kernel/iomgr.c
+  kernel/misc.c
   kernel/xc.c
   kernel/xc_crypto.c
   kernel/kstate.c

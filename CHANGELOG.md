@@ -2,6 +2,240 @@
 
 ## Unreleased
 
+## linux-v0.22.0 (Linux, aarch64 and x86-64, and Android)
+
+### Graphics
+
+- **NV2A logic operations** — Apply framebuffer logic operations on
+  Vulkan GPUs that support them. Logic operations take precedence over
+  blending, and invalid register values leave the previous state intact.
+- **GL-style texture clamping** — Keep the edge texel with nearest
+  filtering and blend with the border color with linear filtering.
+  Mip selection still uses the original texture gradients, and fractional
+  minimum and maximum LOD limits are now applied with mipmapping.
+  Draws that do not use GL-style clamp keep their existing shader cache keys.
+
+These paths were checked with shader tests and Linux smoke tests.
+Their use in retail games and output on Xbox hardware remain unverified.
+
+### Licensing
+
+- Clarify which hakuX-lr files are available under GPL-2.0-or-later and
+  document upstream hakuX, xemu, and the combined core's licensing in
+  `LICENSE`.
+
+The Android ARM64 core remains experimental and targets Android 9 or newer.
+
+## linux-v0.21.0 (Linux, aarch64 and x86-64)
+
+This release brings the measured Xbox voice processor behavior from xemu
+to hakuX-lr, improves video overlays and NV2A rendering, and makes the
+x86-64 core load on Ubuntu 22.04.
+
+### What's new
+
+- **More accurate Xbox audio** — Port raddad772's work from
+  [xemu #3105](https://github.com/xemu-project/xemu/pull/3105). HRTF routing,
+  filters, attenuation, envelopes, LFOs and multipass mixing follow retail
+  Xbox measurements. The hardware resampler is now the default. Sinc and
+  linear remain selectable under **Audio Resampler**. In the
+  [retail console probe comparison](https://github.com/portare-ch/hakuX-lr/pull/166#issuecomment-6712645972),
+  exact matches rose from 237 to 587 of 770 rows. Envelope and LFO timing
+  still differ in some cases.
+- **NV2A rendering** — Add solid, wireframe and point fill modes for front
+  and back faces, with line and polygon smoothing where Vulkan supports
+  them. **Combiner Precision** offers optional 9-bit stage rounding.
+  Accurate is the default on x86-64 Linux and Fast on ARM64.
+- **Ubuntu 22.04 on x86-64** — Lower the core's glibc and libstdc++ runtime
+  requirements. KVM still needs Linux 5.16 or newer, so Ubuntu 22.04 users
+  on the original 5.15 kernel need an HWE or newer kernel.
+- **ISO to CHD tool** — Use `python3 tools/iso_to_chd.py Game.iso` to repack
+  a Redump ISO as XISO before DVD CHD compression. This requires
+  `xdvdfs` and `chdman` and preserves the input file.
+
+### Fixes
+
+- Scale and crop PVIDEO overlays correctly and apply their color keys
+  against the original framebuffer. This fixes clipped video in titles
+  including SpyHunter: Nowhere to Run, Jedi Academy and Worms 4: Mayhem.
+- Preserve voice page addresses when games write output-buffer SGEs and
+  handle unusual multipass layouts without asserting.
+- Restore voice modulation, ramps and filter history when loading internal
+  APU state.
+
+Original fork code marked `GPL-2.0-or-later` is available under those terms.
+The combined core is distributed under `GPL-3.0-or-later`.
+
+## linux-v0.20.0 (Linux, aarch64 and x86-64, and Android)
+
+### What's new
+
+- **ETC2 textures on GPUs without BC** — Re-encode DXT textures as ETC2
+  instead of expanding to RGBA where ETC2 is supported. Voodoo Vince's
+  first-level textures drop from about 125 MB to 21 MB on a 1 GB RG DS Plus.
+  `HAKUX_HLE_DXT_ETC2=0` disables this; `=1` also enables it on GPUs with BC.
+  Android uses `debug.hakux.dxt_etc2`. Volume textures still expand to RGBA.
+- **Texture-memory budget** — Evict older cached textures above 96 MiB on
+  hosts with at most 1.5 GiB of RAM. Other hosts have no default limit.
+  Set `HAKUX_HLE_TEX_BUDGET_MB` (`debug.hakux.tex_budget_mb` on Android), or
+  use `0` to disable the budget. Textures needed by the current draw are kept.
+- **Compatibility list** — Link the [game compatibility list](https://hakuxlr.portareos.org/)
+  from the README.
+
+### Fixes
+
+- Reserve the top 128 KiB of RAM at boot, preventing early heap-guard faults
+  in Conflict: Desert Storm, Desert Storm II, and The Great Escape.
+- Seed the guest page directory and support RAM aliases created from its
+  4 MiB entries, fixing Hitman 2's early heap accesses. Preserve page
+  ownership and dirty tracking when alias tracking fills.
+- Map a zeroed page above each kernel stack, fixing reads past the stack
+  top in Dave Mirra Freestyle BMX 2 and Tomb Raider: Legend.
+- Build `vm-alias-test` before running CTest in clean Linux builds.
+
+A separate intermittent Tomb Raider: Legend heap crash remains under investigation.
+
+## linux-v0.19.2 (Linux, aarch64 and x86-64, and Android)
+
+### Fixes
+
+- **Fix memory leaks after failed allocations** — `NtAllocateVirtualMemory`
+  now rolls back failed commits and removes reservations created by the
+  failed call. Games can retry smaller heap allocations without losing RAM.
+  Fixes Jedi Academy's crash after New Game (#92) and loading failures in
+  Aeon Flux, BloodRayne 2, Beat Down, and other titles. On AMD64, 12 of 13
+  affected games now reach gameplay; Cabela's Outdoor Adventures reaches
+  its gameplay options screen without crashing. Repeated failure logs are
+  rate-limited.
+
+## linux-v0.19.1 (Linux, aarch64 and x86-64, and Android)
+
+3D sound is stereo again, and a game that polls the system time no longer
+enters the kernel for each reading.
+
+### Fixes
+
+- **3D sound by ear** — A 3D voice's four HRTF outputs carry the left ear
+  (the first two) and the right ear (the last two), as the game's DSP image
+  mixes them. hakuX took the left ear from the even outputs, so with
+  DirectSound's submix table each ear reached both sides and positional
+  sound was mono: The Thing's gameplay audio had L = R exactly. The Full
+  DSP path also dropped a mono 3D voice's right ear. Every game with 3D
+  sound is affected; The Thing's gameplay now has its stereo width back,
+  at the same level and balance.
+- **System time without a kernel call** — `KeQuerySystemTime` now runs in
+  guest code and reads `KeSystemTime`, as on the Xbox, in its 1 ms steps.
+  The Thing's intro polls it about 140,000 times a second on AMD64 and over
+  400,000 on the Nova, each poll a kernel entry; its kernel entries fell to
+  about 2,100 a second on AMD64 and 14,200 on the Nova, at the same frame
+  rates. `NC_NO_FAST=1` brings the kernel call back for debugging.
+- **Android core link** — The core for RetroArch on Android links AAudio,
+  which the Communicator needs; without it the core didn't link. 0.19.0's
+  Android zip was already built with this fix.
+
+### Testing
+
+The Linux builds pass CI's checks on both architectures; the `kernel-io`
+guest test now also checks the system time. The APU's stereo tests use
+DirectSound's real submix table, with new checks that a voice heard only by
+the left ear stays on the left. The Thing ran with the new system time on
+AMD64 (KVM, RADV) and on the Retroid Pocket Nova (PortareOS, RetroArch) at
+the same frame rates as before. The Android core builds and packages with
+NDK r29 but hasn't run on an Android device.
+
+Savestates load in both directions; a state saved by an older build keeps
+the kernel call for the system time until the next fresh boot.
+
+Implementations: [3D sound by ear](https://github.com/portare-ch/hakuX-lr/pull/91),
+[system time in guest code](https://github.com/portare-ch/hakuX-lr/pull/89),
+[Android AAudio link](https://github.com/portare-ch/hakuX-lr/pull/88).
+
+## linux-v0.19.0 (Linux, aarch64 and x86-64, and Android)
+
+The Xbox kernel is complete: every one of its 337 functions is implemented,
+so no game stops on a missing one any more. Threads woken by another now run
+first, as on the Xbox. Also the first core for RetroArch on Android
+(experimental) and the fixes from 0.18.1-exp.1 and exp.2.
+
+### What's new
+
+- **Every kernel function** — hakuX implemented 207 of the Xbox kernel's
+  337 functions; a game that called one of the other 130 stopped with
+  `kunimpl`, which the log names. All 337 are there now: the I/O manager's
+  driver model (IRPs, a game's own drivers with their StartIo and
+  completion routines), I/O completion ports and kernel queues, device
+  queues, directory objects, thread notify routines, interlocked lists, the
+  runtime library's strings, numbers and `sprintf`, exceptions and stack
+  walks, and the rest. NBA Inside Drive 2003's memory unit driver and the
+  games that use completion ports had imports this kernel didn't have.
+  Where the Xbox's behaviour isn't fully known or needed, the function is a
+  stub that logs its first call; `native/kernel/STUBS.md` lists them.
+- **Threads woken by another run first** — On the Xbox, a thread released
+  from a wait gets a priority boost (the releaser's increment: 1 for an
+  event set or a semaphore released), so it runs before the thread that
+  woke it. hakuX ignored the boost, and the woken thread waited until the
+  waker blocked or used up its 20 ms time slice. Games hand work between
+  threads this way thousands of times a minute (an event set with that
+  increment, in each game measured); they now take turns as on
+  the console.
+- **RetroArch on Android (experimental, untested)** —
+  `hakux-0.19.0-android-arm64.zip` holds the core for RetroArch on 64-bit
+  Android 9 or newer with a Vulkan 1.2 or newer GPU driver. It hasn't run on
+  an Android device yet. If you try it, please report whether a game
+  starts, with your device, GPU, Android version and the log (`adb logcat`,
+  tags starting with `hakuX`). To install, set **Settings → Drivers →
+  Video** to **vulkan** and restart RetroArch, then choose **Load Core →
+  Install or Restore a Core** and select `hakux_libretro_android.so`; the
+  [README](https://github.com/portare-ch/hakuX-lr/blob/linux-v0.19.0/README.md#play-on-android)
+  has the details. The DSP JIT is Linux-only, so **Audio Processing**
+  defaults to **Fast** on Android.
+
+### Fixes
+
+- **Device I/O requests** — A device control request sent through
+  `IoSynchronousDeviceIoControlRequest` got zeros and success whatever it
+  asked, so a game asking a drive's geometry got 0 bytes per sector. It now
+  goes to the device, which answers as the same request through a file
+  does, and the disc reports its geometry.
+- **Small render targets read by texel** — At a render scale above 1x, a
+  small render-to-texture target (kept at 1x) that a game reads by texel
+  was read from part of its area, stretched. Reported for Sega GT 2002's
+  car skins. From upstream hakuX.
+- **Arm Mali drivers** — From upstream hakuX: on Arm's Mali-G57 driver,
+  W-buffered draws use the rasterizer's depth, avoiding a GPU hang
+  (Morrowind). On Arm's drivers before r40, timeline waits poll the GPU's
+  counter instead of the driver's wait, which lost the device. On Arm's
+  Mali-G52 driver, presents skip the CPU wait and GPU timestamps are off.
+- **Vulkan 1.3 GPUs without descriptor indexing** — The core no longer asks
+  for descriptor-indexing features it doesn't use, which a Vulkan 1.3
+  driver without them refused, so the core couldn't start (ROCKNIX's
+  S922X, Mali-G52). Before creating the device, the core logs the GPU, its
+  driver and each feature it asks for that the GPU lacks.
+
+### Testing
+
+The Linux builds pass CI's checks on both architectures, among them a new
+guest test (`kernel-io`) that drives the kernel's queues, completion ports, a
+game's own driver, IRPs to the disc and the priority boosts, on ARM64 (FEX)
+and AMD64 (KVM). On the Retroid Pocket Nova (PortareOS, RetroArch, on
+screen, 70 s each without input, so title screens and attract modes),
+Burnout 3, Dead or Alive 3, Halo, NBA Inside Drive 2003 and RalliSport
+Challenge ran at the same frame rates with the priority boosts as without
+(59.6, 59.6, 29.8, 30.0 and 30.0 fps), Halo's slowest 5 s at 29.8 fps with
+them against 29.2 without, and nothing stopped. On AMD64 (KVM, RADV) NBA
+Inside Drive 2003, Burnout 3 and Dead or Alive 3 ran at their frame rates
+too. The Android core builds and packages cleanly with the NDK, but hasn't
+run on an Android device.
+
+Savestates from 0.18 load: their threads' priorities become the threads'
+base priorities.
+
+Implementations: [every kernel function](https://github.com/portare-ch/hakuX-lr/pull/86),
+[priority boosts and device I/O requests](https://github.com/portare-ch/hakuX-lr/pull/87),
+[Android core](https://github.com/portare-ch/hakuX-lr/pull/81),
+[upstream fixes](https://github.com/portare-ch/hakuX-lr/pull/80),
+[Vulkan 1.3 without descriptor indexing](https://github.com/portare-ch/hakuX-lr/pull/79).
+
 ## linux-v0.18.1-exp.2 (Linux, aarch64 and x86-64, and Android, experimental)
 
 A first build for RetroArch on Android, untested on devices so far, and

@@ -62,6 +62,10 @@ enum {
     HLE_XFMT_LIN_R5G5B5A1 = 0x3D, HLE_XFMT_LIN_R4G4B4A4 = 0x3E,
     HLE_XFMT_LIN_A8B8G8R8 = 0x3F, HLE_XFMT_LIN_B8G8R8A8 = 0x40,
     HLE_XFMT_LIN_R8G8B8A8 = 0x41,
+    /* Not the Xbox's: a DXT texture's texels encoded again as ETC2 for a GPU
+     * without BC (pb/pbres.c, tex/etc2_enc.h); the same 4x4 blocks and bytes
+     * as DXT1 (RGB, RGB A1) and DXT3/5 (RGBA) */
+    HLE_XFMT_ETC2_RGB = 0x42, HLE_XFMT_ETC2_RGBA1 = 0x43, HLE_XFMT_ETC2_RGBA = 0x44,
 };
 
 /* D3DCLEAR (the NV2A's CLEAR_SURFACE bits) */

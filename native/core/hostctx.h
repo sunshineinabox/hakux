@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * hakuX native core — a signal's host context (a ucontext_t *): the PC and
  * SP the fault handlers and reports read, on either host.

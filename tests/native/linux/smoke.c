@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "native/core/core.h"
 #include "native/core/mmio.h"
 #include "native/hle/hle_native.h"

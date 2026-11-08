@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "native/core/nc.h"
 #include "hw/xbox/hle/vk/vkdev.h"
 

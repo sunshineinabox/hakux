@@ -1,9 +1,5 @@
-/*
- * hakuX HLE GPU — the display's gamma ramp (SetGammaRamp) at swap: the
- * swap's blit becomes a fullscreen pass that samples the presented surface
- * and maps each channel through the ramp (the NV2A DAC does this at
- * scanout). Identity ramps keep the blit (back.c).
- */
+/* Swap display pass: apply the gamma ramp and compose the PVIDEO overlay.
+ * Frames without either use the regular blit in back.c. */
 #include "hw/xbox/hle/base.h"
 #include "hw/xbox/hle/hle.h"
 #include "hw/xbox/hle/shader/glsl_compile.h"
@@ -23,23 +19,57 @@ static const char k_vs[] =
     "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
     "}\n";
 
+/* Flags: bit 0 gamma, bit 1 overlay, bit 2 colour key, bits 4-5 pixel format.
+ * Key comparisons use the original framebuffer pixel, before gamma. */
 static const char k_fs[] =
     "#version 450\n"
     "layout(set = 0, binding = 0) uniform sampler2D src;\n"
     "layout(set = 0, binding = 1, std140) uniform G { uvec4 w[48]; } g;\n"
+    "layout(set = 0, binding = 2) uniform sampler2D ovl;\n"
+    "layout(push_constant, std430) uniform P {\n"
+    "  vec4 rect, in_;\n"
+    "  vec2 pix;\n"
+    "  uint flags, key;\n"
+    "} p;\n"
     "layout(location = 0) in vec2 uv;\n"
     "layout(location = 0) out vec4 o;\n"
     "uint lut(uint i) {\n"
     "  uint word = g.w[i >> 4][(i >> 2) & 3u];\n"
     "  return (word >> ((i & 3u) * 8u)) & 0xFFu;\n"
     "}\n"
+    "uint raw(vec3 c, uint f) {\n"
+    "  c = clamp(c, 0.0, 1.0);\n"
+    "  if (f == 1u) { uvec3 v = uvec3(c * vec3(31.0, 63.0, 31.0) + 0.5); return v.r << 11 | v.g << 5 | v.b; }\n"
+    "  if (f == 2u) { uvec3 v = uvec3(c * 31.0 + 0.5); return v.r << 10 | v.g << 5 | v.b; }\n"
+    "  uvec3 v = uvec3(c * 255.0 + 0.5);\n"
+    "  return v.r << 16 | v.g << 8 | v.b;\n"
+    "}\n"
     "void main() {\n"
     "  vec4 c = texture(src, uv);\n"
-    "  uvec3 v = uvec3(clamp(c.rgb, 0.0, 1.0) * 255.0 + 0.5);\n"
-    "  o = vec4(float(lut(v.r)), float(lut(256u + v.g)), float(lut(512u + v.b)), 255.0)"
-    " / 255.0;\n"
-    "  o.a = c.a;\n"
+    "  o = c;\n"
+    "  if ((p.flags & 1u) != 0u) {\n"
+    "    uvec3 v = uvec3(clamp(c.rgb, 0.0, 1.0) * 255.0 + 0.5);\n"
+    "    o = vec4(float(lut(v.r)), float(lut(256u + v.g)), float(lut(512u + v.b)), 255.0) / 255.0;\n"
+    "    o.a = c.a;\n"
+    "  }\n"
+    "  if ((p.flags & 2u) != 0u) {\n"
+    "    vec2 f = gl_FragCoord.xy / p.pix;\n"
+    "    if (all(greaterThanEqual(f, p.rect.xy)) && all(lessThan(f, p.rect.zw))) {\n"
+    "      uint fmt = (p.flags >> 4) & 3u;\n"
+    "      uint mask = fmt == 1u ? 0xFFFFu : fmt == 2u ? 0x7FFFu : 0xFFFFFFu;\n"
+    "      ivec2 t = min(ivec2(uv * vec2(textureSize(src, 0))), textureSize(src, 0) - 1);\n"
+    "      if ((p.flags & 4u) == 0u || raw(texelFetch(src, t, 0).rgb, fmt) == (p.key & mask)) {\n"
+    "        vec2 st = p.in_.xy + (f - p.rect.xy) * p.in_.zw;\n"
+    "        o = vec4(texture(ovl, st / vec2(textureSize(ovl, 0))).rgb, 1.0);\n"
+    "      }\n"
+    "    }\n"
+    "  }\n"
     "}\n";
+
+typedef struct DispPush {
+    float rect[4], in[4], pix[2];
+    uint32_t flags, key;
+} DispPush;
 
 static struct {
     bool ready, failed;
@@ -81,15 +111,18 @@ static bool init(void)
         return g_gm.ready;
     }
     g_gm.failed = true;                 /* until everything below succeeds */
-    VkDescriptorSetLayoutBinding b[2] = {
+    VkDescriptorSetLayoutBinding b[3] = {
         { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
         { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
+        { 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
     };
     VkDescriptorSetLayoutCreateInfo dci = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 2, .pBindings = b };
+        .bindingCount = 3, .pBindings = b };
+    VkPushConstantRange pcr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(DispPush) };
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                                       .setLayoutCount = 1, .pSetLayouts = &g_gm.dsl };
+                                       .setLayoutCount = 1, .pSetLayouts = &g_gm.dsl,
+                                       .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
     VkSamplerCreateInfo sci = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
@@ -98,7 +131,7 @@ static bool init(void)
         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = 0.0f };
     VkDescriptorPoolSize ps[2] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, GM_SLOTS },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * GM_SLOTS },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, GM_SLOTS },
     };
     VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -113,7 +146,7 @@ static bool init(void)
         T.vkCreateSampler(g_hvk.dev, &sci, NULL, &g_gm.smp) != VK_SUCCESS ||
         T.vkCreateDescriptorPool(g_hvk.dev, &dpi, NULL, &g_gm.pool) != VK_SUCCESS ||
         T.vkCreateBuffer(g_hvk.dev, &bci, NULL, &g_gm.ubo) != VK_SUCCESS) {
-        hle_log("hakuX-hle-back", "gamma: setup failed (ramps not applied)");
+        hle_log("hakuX-hle-back", "display pass: setup failed (no gamma ramps, overlays blitted)");
         return false;
     }
     VkMemoryRequirements mr;
@@ -126,7 +159,7 @@ static bool init(void)
         T.vkBindBufferMemory(g_hvk.dev, g_gm.ubo, g_gm.mem, 0) != VK_SUCCESS ||
         T.vkMapMemory(g_hvk.dev, g_gm.mem, 0, VK_WHOLE_SIZE, 0, (void **)&g_gm.map) !=
             VK_SUCCESS) {
-        hle_log("hakuX-hle-back", "gamma: buffer failed (ramps not applied)");
+        hle_log("hakuX-hle-back", "display pass: buffer failed (no gamma ramps, overlays blitted)");
         return false;
     }
     VkDescriptorSetLayout ls[GM_SLOTS] = { g_gm.dsl, g_gm.dsl, g_gm.dsl };
@@ -186,12 +219,12 @@ static bool init(void)
         T.vkDestroyShaderModule(g_hvk.dev, fm, NULL);
     }
     if (!g_gm.pipe) {
-        hle_log("hakuX-hle-back", "gamma: pipeline failed (ramps not applied)");
+        hle_log("hakuX-hle-back", "display pass: pipeline failed (no gamma ramps, overlays blitted)");
         return false;
     }
     g_gm.failed = false;
     g_gm.ready = true;
-    hle_log("hakuX-hle-back", "gamma: display pass ready");
+    hle_log("hakuX-hle-back", "display pass ready");
     return true;
 }
 
@@ -231,8 +264,9 @@ static VkImageView dst_view(VkImage img)
     return v;
 }
 
-bool hle_gamma_pass(VkCommandBuffer cb, unsigned slot, const uint8_t ramp[3][256],
-                    HleVkSurf *src, uint32_t sw, uint32_t sh, VkImage dst, uint32_t dw, uint32_t dh)
+bool hle_display_pass(VkCommandBuffer cb, unsigned slot, const uint8_t ramp[3][256],
+                      HleVkSurf *src, uint32_t sw, uint32_t sh, const HleDispOverlay *ov,
+                      VkImage dst, uint32_t dw, uint32_t dh)
 {
     if (!init()) {
         return false;
@@ -242,19 +276,36 @@ bool hle_gamma_pass(VkCommandBuffer cb, unsigned slot, const uint8_t ramp[3][256
         return false;
     }
     slot %= GM_SLOTS;                   /* this frame slot's earlier use has completed */
-    memcpy(g_gm.map + slot * GM_STRIDE, ramp, 768);
+    if (ramp) {
+        memcpy(g_gm.map + slot * GM_STRIDE, ramp, 768);
+    }
     hle_surf_transition(cb, src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     VkDescriptorImageInfo ii = { g_gm.smp, src->view, src->layout };   /* or GENERAL */
     VkDescriptorBufferInfo bi = { g_gm.ubo, slot * GM_STRIDE, 768 };
-    VkWriteDescriptorSet w[2] = {
+    /* without an overlay, the source stands in for it (never sampled) */
+    VkDescriptorImageInfo oi = ov ? (VkDescriptorImageInfo){ g_gm.smp, ov->view,
+                                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }
+                                  : ii;
+    VkWriteDescriptorSet w[3] = {
         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_gm.set[slot],
           .dstBinding = 0, .descriptorCount = 1,
           .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii },
         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_gm.set[slot],
           .dstBinding = 1, .descriptorCount = 1,
           .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bi },
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g_gm.set[slot],
+          .dstBinding = 2, .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &oi },
     };
-    T.vkUpdateDescriptorSets(g_hvk.dev, 2, w, 0, NULL);
+    T.vkUpdateDescriptorSets(g_hvk.dev, 3, w, 0, NULL);
+    DispPush pc = { .flags = (ramp ? 1u : 0u) };
+    if (ov) {
+        memcpy(pc.rect, ov->rect, sizeof(pc.rect));
+        memcpy(pc.in, ov->in, sizeof(pc.in));
+        memcpy(pc.pix, ov->pix, sizeof(pc.pix));
+        pc.flags |= 2u | (ov->key_on ? 4u : 0u) | (ov->key_fmt & 3u) << 4;
+        pc.key = ov->key;
+    }
     hle_img_barrier(cb, dst, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo ca = {
@@ -274,6 +325,7 @@ bool hle_gamma_pass(VkCommandBuffer cb, unsigned slot, const uint8_t ramp[3][256
     T.vkCmdSetScissor(cb, 0, 1, &sc);
     T.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_gm.pl, 0, 1,
                               &g_gm.set[slot], 0, NULL);
+    T.vkCmdPushConstants(cb, g_gm.pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
     T.vkCmdDraw(cb, 3, 1, 0, 0);
     T.vkCmdEndRendering(cb);
     hle_img_barrier(cb, dst, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,

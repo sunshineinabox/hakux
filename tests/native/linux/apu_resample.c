@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The voices' resamplers (vp/resample.h) through the real voice processing,
  * linear and sinc (the hakux_audio_resampler option, NC_APU_RESAMPLER):
  * a looping 22.05 kHz voice's levels and its seamless loop, the pitch
@@ -182,7 +183,9 @@ static void test_end(int q, int *end_frame, long *heard, long *lead)
 /* Short one-shot sounds, their decoder at the end in their first frame or
  * two: all of each heard, then the voice off. 64 frames at 22.05 kHz (139
  * output frames) and 128 at 96 kHz (64: the stretched filter), at half
- * scale: the output frames at half that level or more. */
+ * scale: the output frames at half that level or more, less the first
+ * frame's first half (a new voice fades in across its first frame,
+ * measured). */
 static void test_short(int q)
 {
     static const struct {
@@ -212,10 +215,11 @@ static void test_short(int q)
         for (long i = 0; i < 20 * NUM_SAMPLES_PER_FRAME; i++) {
             loud += g_rec[i][0] >= 8192;
         }
-        const double want = k_sounds[k].frames * ratio_of(p);
+        const double want = k_sounds[k].frames * ratio_of(p) - NUM_SAMPLES_PER_FRAME / 2;
         char what[200];
-        snprintf(what, sizeof(what), "%s: a %u-frame sound at %.2f kHz: %ld output frames heard of %.0f, "
-                 "inactive after frame %d", k_q[q], k_sounds[k].frames, k_sounds[k].fs / 1000, loud, want, end_frame);
+        snprintf(what, sizeof(what), "%s: a %u-frame sound at %.2f kHz: %ld output frames heard of %.0f "
+                 "(the fade-in's first 16 left out), inactive after frame %d", k_q[q], k_sounds[k].frames,
+                 k_sounds[k].fs / 1000, loud, want, end_frame);
         check(fabs(loud - want) <= 3 && end_frame >= 0, what);
     }
 }

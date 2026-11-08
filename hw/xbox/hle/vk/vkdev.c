@@ -188,6 +188,10 @@ static const struct { VkStructureType s; const char *name; unsigned n; } k_feat[
          graphicsPipelineLibrary),
     FEAT(DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR, VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR,
          dynamicRenderingLocalRead),
+    FEAT(LINE_RASTERIZATION_FEATURES_KHR, VkPhysicalDeviceLineRasterizationFeaturesKHR,
+         stippledSmoothLines),
+    FEAT(FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR,
+         VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR, fragmentShaderBarycentric),
     FEAT(RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT,
          VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT,
          rasterizationOrderStencilAttachmentAccess),
@@ -260,6 +264,7 @@ static void caps_override(HleCaps *c)
     }
     static const struct { const char *name; size_t off; } k_caps[] = {
         { "bc", offsetof(HleCaps, bc) },             { "vids", offsetof(HleCaps, vids) },
+        { "etc2", offsetof(HleCaps, etc2) },
         { "push", offsetof(HleCaps, push) },         { "pushdesc", offsetof(HleCaps, push_desc) },
         { "cbc", offsetof(HleCaps, cbc) },           { "d24s8", offsetof(HleCaps, d24s8) },
         { "4444", offsetof(HleCaps, x4444) },        { "bindless", offsetof(HleCaps, bindless) },
@@ -273,6 +278,8 @@ static void caps_override(HleCaps *c)
         { "eds1", offsetof(HleCaps, eds1) },         { "eds2", offsetof(HleCaps, eds2) },
         { "aniso", offsetof(HleCaps, aniso) },
         { "widelines", offsetof(HleCaps, wide_lines) },
+        { "fillmodes", offsetof(HleCaps, fill_modes) },
+        { "smoothlines", offsetof(HleCaps, smooth_lines) }, { "bary", offsetof(HleCaps, bary) },
     };
     for (char *save = NULL, *t = strtok_r(v, ", ", &save); t; t = strtok_r(NULL, ", ", &save)) {
         const char *name = *t == '-' ? t + 1 : t;
@@ -314,6 +321,24 @@ void hle_vk_set_window_extensions(const char *const *names, uint32_t n)
 }
 #endif
 
+/* Vulkan API version chosen for the instance. */
+static uint32_t g_inst_api;
+
+uint32_t hle_vk_instance_version(void)
+{
+    if (volkGetInstanceVersion() == 0) {
+        PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)hle_host_vk_loader();
+        if (gipa) {
+            volkInitializeCustom(gipa);
+        } else {
+            volkInitialize();
+        }
+    }
+    g_inst_api = volkGetInstanceVersion() >= VK_API_VERSION_1_4 ? VK_API_VERSION_1_4
+                                                                : VK_API_VERSION_1_3;
+    return g_inst_api;
+}
+
 static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared, VkPhysicalDevice gpu,
                    VkSurfaceKHR surface, HleVkMakeDevice make, void *opaque)
 {
@@ -347,7 +372,7 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
         VkApplicationInfo app = {
             .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pApplicationName = "hakuX-hle",
-            .apiVersion = force11 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_3,
+            .apiVersion = force11 ? VK_API_VERSION_1_1 : hle_vk_instance_version(),
         };
         /* the window's surface (vk/swapchain.c): where the loader has it */
         uint32_t nie = 0;
@@ -443,11 +468,18 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
                  has_ext(ext, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
     bool e_lr = has_ext(ext, ne, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
     bool e_roa = has_ext(ext, ne, VK_EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME);
+    bool e_bary = has_ext(ext, ne, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
     bool e_pd = has_ext(ext, ne, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    /* Use the API version supported by both the instance and device. */
+    const uint32_t inst_api = g_inst_api ? g_inst_api : VK_API_VERSION_1_3;
+    const uint32_t api = force11 ? VK_API_VERSION_1_1 : MIN(v->props.apiVersion, inst_api);
+    const bool v14 = api >= VK_API_VERSION_1_4;
+    const bool v13 = api >= VK_API_VERSION_1_3, v12 = api >= VK_API_VERSION_1_2;
+    /* Line rasterization: core in 1.4, else either extension. */
+    bool e_lrk = has_ext(ext, ne, VK_KHR_LINE_RASTERIZATION_EXTENSION_NAME);
+    bool e_lrast = v14 || e_lrk || has_ext(ext, ne, VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME);
     /* Below 1.3 (vk/compat.c): what 1.2 and 1.3 made core, from extensions;
      * a 1.2 device has 1.2's in its core (the structs are core 1.2's then) */
-    const uint32_t api = force11 ? VK_API_VERSION_1_1 : v->props.apiVersion;
-    const bool v13 = api >= VK_API_VERSION_1_3, v12 = api >= VK_API_VERSION_1_2;
     bool e_tl = v12 || has_ext(ext, ne, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
     bool e_di = v12 || has_ext(ext, ne, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
     bool e_bda = v12 || has_ext(ext, ne, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
@@ -505,6 +537,10 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT };
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR q_lr = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR };
+    VkPhysicalDeviceLineRasterizationFeaturesKHR q_lrast = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_KHR };
+    VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR q_bary = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR };
     VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT q_roa = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT };
     VkPhysicalDeviceVulkan13Features q13 = {
@@ -553,6 +589,8 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
     if (e_gpl) chain(&tail, &q_gpl);
     if (e_lr) chain(&tail, &q_lr);
     if (e_roa) chain(&tail, &q_roa);
+    if (e_lrast) chain(&tail, &q_lrast);
+    if (e_bary) chain(&tail, &q_bary);
     vkGetPhysicalDeviceFeatures2(v->phys, &q);
     /* the limits the bindless set and the samplers need (Vulkan 1.2's: a 1.1
      * device fails the floor without them) */
@@ -596,6 +634,10 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
     need(c, v->qfam != UINT32_MAX, "graphics queue");
     c->wide_lines = q.features.wideLines;
     c->max_line_width = c->wide_lines ? v->props.limits.lineWidthRange[1] : 1.0f;
+    c->fill_modes = q.features.fillModeNonSolid;
+    c->logic_op = q.features.logicOp;
+    c->smooth_lines = e_lrast && q_lrast.smoothLines;
+    c->bary = e_bary && q_bary.fragmentShaderBarycentric;
     need(c, q.features.largePoints, "largePoints");
     c->depth_clamp = q.features.depthClamp;
     need(c, ok_tl, "timelineSemaphore");
@@ -644,6 +686,7 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
         c->r5551 = ok[2];
         c->r4444 = ok[3];
     }
+    c->etc2 = q.features.textureCompressionETC2;
     c->bc = q.features.textureCompressionBC;
     if (!c->bc) {
         /* the formats without the feature (Xclipse; PowerVR's D-Series) */
@@ -702,6 +745,15 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
     vkGetPhysicalDeviceFormatProperties(v->phys, VK_FORMAT_R16G16_SSCALED, &fp);
     c->sscaled = fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT;
     caps_override(c);
+    {   /* DXT as ETC2 (tex/etc2_enc.h): without BC, where the driver samples
+         * ETC2; HAKUX_HLE_DXT_ETC2 / debug.hakux.dxt_etc2 decides either way */
+        char v[32] = "";
+#ifdef __ANDROID__
+        hle_prop_get("debug.hakux.dxt_etc2", v);
+#endif
+        const char *e = v[0] ? v : getenv("HAKUX_HLE_DXT_ETC2");
+        c->dxt_etc2 = c->etc2 && (e ? atoi(e) != 0 : !c->bc);
+    }
     c->max_line_width = c->wide_lines ? c->max_line_width : 1.0f;
     c->fbfetch = c->fbfetch && c->dyn_render;  /* local read is dynamic rendering's */
     /* with local read, dynamic rendering's pipelines may ask for it (VUID-06482) */
@@ -804,6 +856,7 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
     VkPhysicalDevicePipelineCreationCacheControlFeatures f_pcc = {
         .sType = q_pcc.sType, .pipelineCreationCacheControl = VK_TRUE };
     f.features.wideLines = c->wide_lines;
+    f.features.fillModeNonSolid = c->fill_modes;
     f.features.largePoints = VK_TRUE;
     f.features.depthClamp = c->depth_clamp;
     f.features.shaderSampledImageArrayDynamicIndexing = !c->bindless;
@@ -837,6 +890,12 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
     if (c->gpl) chain(&tail, &f_gpl);
     if (c->fbfetch) chain(&tail, &f_lr);
     if (c->raster_order) chain(&tail, &f_roa);
+    VkPhysicalDeviceLineRasterizationFeaturesKHR f_lrast = {
+        .sType = q_lrast.sType, .smoothLines = VK_TRUE };
+    VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR f_bary = {
+        .sType = q_bary.sType, .fragmentShaderBarycentric = VK_TRUE };
+    if (c->smooth_lines) chain(&tail, &f_lrast);
+    if (c->bary) chain(&tail, &f_bary);
 
     const char *exts[32];
     uint32_t nx = 0;
@@ -880,6 +939,11 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
     if (c->raster_order) {
         exts[nx++] = VK_EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME;
     }
+    if (c->smooth_lines && !v14) {
+        exts[nx++] = e_lrk ? VK_KHR_LINE_RASTERIZATION_EXTENSION_NAME
+                           : VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME;
+    }
+    if (c->bary) exts[nx++] = VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME;
     if (c->fbfetch) {
         exts[nx++] = VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME;
         if (e_pd) {
@@ -897,20 +961,22 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f,
         .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
         .enabledExtensionCount = nx, .ppEnabledExtensionNames = exts };
-    hle_log("hakuX-hle-back", "vk: device \"%s\" api %u.%u.%u driver 0x%x floor=ok "
+    hle_log("hakuX-hle-back", "vk: device \"%s\" api %u.%u.%u (used as %u.%u) driver 0x%x floor=ok "
             "plus: gpl=%d eds3=%d dbuf=%d m5=%d sscaled=%d local_read=%d fbfetch=%d "
-            "raster_order=%d cache_control=%d swapchain=%d",
+            "raster_order=%d cache_control=%d swapchain=%d fill_modes=%d smooth_lines=%d bary=%d",
             v->props.deviceName, VK_API_VERSION_MAJOR(v->props.apiVersion),
             VK_API_VERSION_MINOR(v->props.apiVersion),
-            VK_API_VERSION_PATCH(v->props.apiVersion), v->props.driverVersion,
+            VK_API_VERSION_PATCH(v->props.apiVersion), VK_API_VERSION_MAJOR(api),
+            VK_API_VERSION_MINOR(api), v->props.driverVersion,
             c->gpl, c->eds3, c->descriptor_buffer, c->maint5, c->sscaled,
-            c->local_read, c->fbfetch, c->raster_order, c->cache_control, c->swapchain);
+            c->local_read, c->fbfetch, c->raster_order, c->cache_control, c->swapchain,
+            c->fill_modes, c->smooth_lines, c->bary);
     hle_log("hakuX-hle-back", "vk: bc=%d vids=%d push=%d push_desc=%d cbc=%d cbc_any=%d bcs=%d "
             "bcs_image=%d x4444=%d r16=%d r5551=%d r4444=%d d24s8=%d bda=%d ahb=%d vk13=%d "
-            "dyn_render=%d sync2=%d eds1=%d eds2=%d bindless=%d depth_clamp=%d (0: the substitute "
-            "runs)", c->bc, c->vids, c->push, c->push_desc, c->cbc, c->cbc_any, c->bcs, c->bcs_image,
+            "dyn_render=%d sync2=%d eds1=%d eds2=%d bindless=%d depth_clamp=%d etc2=%d dxt_etc2=%d "
+            "(0: the substitute runs)", c->bc, c->vids, c->push, c->push_desc, c->cbc, c->cbc_any, c->bcs, c->bcs_image,
             c->x4444, c->r16, c->r5551, c->r4444, c->d24s8, c->bda, c->ahb, c->vk13, c->dyn_render, c->sync2, c->eds1, c->eds2,
-            c->bindless, c->depth_clamp);
+            c->bindless, c->depth_clamp, c->etc2, c->dxt_etc2);
     hle_quirks_init(v->phys);           /* what this driver needs worked around */
     log_unsupported(&f, &q);
     VkResult r;

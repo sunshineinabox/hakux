@@ -541,18 +541,21 @@ void hle_pipe_prebuild(uint32_t max, void (*add)(uint64_t hash, VkPipeline p))
     for (unsigned i = 0; i < nth; i++) {
         hle_thread_join(&th[i]);
     }
-    unsigned ok = 0, failed = 0;
+    unsigned ok = 0, failed = 0, unsup = 0;
     for (uint32_t i = 0; i < n; i++) {
         RecPipe *r = &g_pa.list[i];
         if (r->r == HLE_PB_OK && r->pipe) {
             add(r->hash, r->pipe);
             ok++;
+        } else if (r->r == HLE_PB_UNSUPPORTED) {
+            unsup++;
         } else {
             failed++;
         }
     }
     hle_log("hakuX-hle-pipe", "prebuild: %u of %u recorded pipelines in %.0f ms on %u threads "
-            "(%u failed)", ok, g_pa.nlist, (g_get_monotonic_time() - t0) / 1000.0, nth, failed);
+            "(%u failed, %u needing features off this session)", ok, g_pa.nlist,
+            (g_get_monotonic_time() - t0) / 1000.0, nth, failed, unsup);
     hle_atomic_set(&g_pa.pb_total, 0);
     hle_atomic_set(&g_pa.pb_done, 0);
 }

@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * hakuX native core — the VP's own stereo mix (MON_VP, the default without
  * the DSP) for 2D and 3D voices: a voice routed to the speakers is mixed
@@ -36,12 +37,16 @@
  * the other side at -24.4 dB (at 1 kHz) that this mix leaves out. What the
  * hardware's analog stage and level do isn't measured.
  *
- * A send's source channel is its slot modulo the source's channels: a 2D
- * voice's own (vp.c mix_one_bin), a 3D voice's HRTF filter's two ears
- * (DirectSound's HRTF submixes in the order front left, front right, back
- * left, back right: the left ear to the even slots). Its destination is
- * the bin it names; its headroom the shift the VP's mix-bin path gives that
- * send (vp.c).
+ * A 3D voice sends its left ear through slots 0–1 and its right ear through
+ * slots 2–3 (xemu #3105). Those four go to the bins
+ * the guest names with SET_HRTF_SUBMIXES, and DirectSound names them in the
+ * order 6, 8, 7, 9: 3D front left, back left, front right, back right
+ * (0x09070806 in both Dead or Alive 3 and The Thing), so each ear reaches
+ * its own side's front and back bins. Taken as the even slots for the left
+ * ear, the left ear went to front left and front right and the right ear
+ * to both back bins: every 3D sound came out the same on both speakers.
+ * Its destination is the bin it names; its headroom the shift the VP's
+ * mix-bin path gives that send (vp.c).
  */
 #ifndef NATIVE_DEV_APU_VP_STEREO_ROUTE_H
 #define NATIVE_DEV_APU_VP_STEREO_ROUTE_H
@@ -63,6 +68,24 @@
 #define VP_BIN_3D_BACK_RIGHT  9
 #define VP_SENDS            8
 #define VP_DOWNMIX_SIDE     0.70710678f     /* -3 dB */
+
+/* Sources: two voice channels, two HRTF ears and the I3DL2 room path. */
+#define VP_SOURCES 5
+#define VP_SOURCE_EARS 2
+#define VP_SOURCE_ROOM 4
+
+/* Route 3D sends 0–3 to the HRTF ears and I3DL2 sends 5 and 7 to the room.
+ * Other sends select a voice channel by slot modulo channel count. */
+static inline unsigned vp_send_channel(int slot, bool three_d, bool room, unsigned channels)
+{
+    if (three_d && slot < 4) {
+        return VP_SOURCE_EARS + ((unsigned)slot >> 1);
+    }
+    if (room && (slot == 5 || slot == 7)) {
+        return VP_SOURCE_ROOM;
+    }
+    return (unsigned)slot % channels;
+}
 
 /* A 2D voice's route in the VP's own mix, a sound's (vp.c) */
 enum { VP_ROUTE_UNDECIDED = 0, VP_ROUTE_SPEAKERS = 1, VP_ROUTE_MONITOR = 2 };
@@ -117,43 +140,75 @@ static inline int vp_stereo_classify(const int bin[VP_SENDS], const float att[VP
 }
 
 /* The gains of a speaker-routed voice's sends to the two speakers: g[o][s]
- * from source channel s to output o (0 left, 1 right), each speaker send's
- * ea * attenuation / 2^shift[send] (its headroom) added in by its downmix
- * weights; every gain 0 when its speaker sends are muted. channels: the
- * source's (a 3D voice's two ears). */
+ * from source s (vp_send_channel) to output o (0 left, 1 right), each
+ * speaker send's ea * attenuation / 2^shift[send] (its headroom) added in by
+ * its downmix weights; every gain 0 when its speaker sends are muted.
+ * channels: the voice's; three_d: a 3D voice, its first four sends its
+ * ears'; room: its I3DL2 room path on sends 5 and 7. */
 static inline void vp_stereo_gains(const int bin[VP_SENDS], const float att[VP_SENDS],
-                                   const uint8_t shift[VP_SENDS], unsigned channels, float ea,
-                                   float g[2][2])
+                                   const uint8_t shift[VP_SENDS], unsigned channels, bool three_d,
+                                   bool room, float ea, float g[2][VP_SOURCES])
 {
     float w[2];
-    g[0][0] = g[0][1] = g[1][0] = g[1][1] = 0.0f;
+    for (int s = 0; s < VP_SOURCES; s++) {
+        g[0][s] = g[1][s] = 0.0f;
+    }
     for (int b = 0; b < VP_SENDS; b++) {
         if (att[b] == 0.0f || !vp_downmix_weights(bin[b], w)) {
             continue;
         }
         const float a = ea * att[b] / (float)(1u << shift[b]);
-        g[0][b % channels] += a * w[0];
-        g[1][b % channels] += a * w[1];
+        const unsigned src = vp_send_channel(b, three_d, room, channels);
+        g[0][src] += a * w[0];
+        g[1][src] += a * w[1];
     }
 }
 
 /* The voice's frame into the speakers by its gains (vp_stereo_gains), added
- * to out: a mono voice's one channel, a stereo voice's two. */
-static inline void vp_stereo_mix(float out[NUM_SAMPLES_PER_FRAME][2],
-                                 const float in[NUM_SAMPLES_PER_FRAME][2], const float g[2][2],
-                                 unsigned channels)
+ * to out: a mono voice's one channel, a stereo voice's two, a 3D voice's
+ * ears and room path (ears, room: NULL without). The gains move from
+ * the last frame's (from) to this frame's (to) across the frame, sample i
+ * i/32 of the way, as the routes' gains do in the mix bins (without
+ * their rounding to 1/16384). */
+static inline void vp_stereo_mix_ramp(float out[NUM_SAMPLES_PER_FRAME][2],
+                                      const float in[NUM_SAMPLES_PER_FRAME][2],
+                                      const float (*ears)[2], const float *room,
+                                      const float from[2][VP_SOURCES],
+                                      const float to[2][VP_SOURCES], unsigned channels)
 {
-    if (channels == 1) {
-        for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-            out[i][0] += g[0][0] * in[i][0];
-            out[i][1] += g[1][0] * in[i][0];
-        }
-        return;
-    }
     for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-        out[i][0] += g[0][0] * in[i][0] + g[0][1] * in[i][1];
-        out[i][1] += g[1][0] * in[i][0] + g[1][1] * in[i][1];
+        const float t = i / (float)NUM_SAMPLES_PER_FRAME;
+        float g[2][VP_SOURCES];
+        for (int o = 0; o < 2; o++) {
+            for (int s = 0; s < VP_SOURCES; s++) {
+                g[o][s] = from[o][s] + (to[o][s] - from[o][s]) * t;
+            }
+        }
+        float l = g[0][0] * in[i][0], r = g[1][0] * in[i][0];
+        if (channels == 2) {
+            l += g[0][1] * in[i][1];
+            r += g[1][1] * in[i][1];
+        }
+        if (ears) {
+            l += g[0][2] * ears[i][0] + g[0][3] * ears[i][1];
+            r += g[1][2] * ears[i][0] + g[1][3] * ears[i][1];
+        }
+        if (room) {
+            l += g[0][VP_SOURCE_ROOM] * room[i];
+            r += g[1][VP_SOURCE_ROOM] * room[i];
+        }
+        out[i][0] += l;
+        out[i][1] += r;
     }
+}
+
+/* Mix with constant gains. */
+static inline void vp_stereo_mix(float out[NUM_SAMPLES_PER_FRAME][2],
+                                 const float in[NUM_SAMPLES_PER_FRAME][2],
+                                 const float (*ears)[2], const float *room,
+                                 const float g[2][VP_SOURCES], unsigned channels)
+{
+    vp_stereo_mix_ramp(out, in, ears, room, g, g, channels);
 }
 
 #endif

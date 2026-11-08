@@ -28,6 +28,8 @@
 #define KI_CONNECTED 0x10
 
 #define PCR_IRQL      0x24
+#define APC_LEVEL      1
+#define DISPATCH_LEVEL 2
 #define ISR_STACK     0x4000u
 #define ISR_PRIORITY  2000
 
@@ -98,6 +100,49 @@ static uint64_t KeSynchronizeExecution(NcKernel *k, NcFrame *f, const uint32_t *
 {
     const uint8_t level = (uint8_t)nc_vm_rd32(k->vm, a[0] + KI_IRQL);
     nc_kernel_callout_at_irql(k, f, a[1], &a[2], 1, level > *irql(k) ? level : *irql(k));
+    return 0;
+}
+
+/* HalEnableSystemInterrupt(BusInterruptLevel, InterruptMode): the line is unmasked.
+ * Every line is level triggered here, so the mode isn't kept (as KeConnectInterrupt). */
+static uint64_t HalEnableSystemInterrupt(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    nc_irq_enable(a[0], true);
+    return 0;
+}
+
+/* HalDisableSystemInterrupt(BusInterruptLevel): the line is masked */
+static uint64_t HalDisableSystemInterrupt(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    nc_irq_enable(a[0], false);
+    return 0;
+}
+
+/* HalRequestSoftwareInterrupt(RequestIrql): a DISPATCH_LEVEL request is the
+ * scheduler's turn (queued DPCs, then the thread to run), which waits for a
+ * kernel exit with the IRQL below DISPATCH_LEVEL. */
+static uint64_t HalRequestSoftwareInterrupt(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    const uint8_t level = (uint8_t)a[0];
+    if (level == DISPATCH_LEVEL) {
+        k->resched = true;
+    } else if (level == APC_LEVEL) {
+        /* TODO: APC_LEVEL requests are ignored; APCs run in alertable waits only */
+        static bool s_logged;
+        if (!s_logged) {
+            s_logged = true;
+            nc_log("hakuX-native", "intr: HalRequestSoftwareInterrupt(APC_LEVEL) from %08x ignored",
+                   nc_vm_rd32(k->vm, nc_frame_gpr(f, NC_ESP)));
+        }
+    }
+    return 0;
+}
+
+/* HalClearSoftwareInterrupt(RequestIrql): nothing to clear; a DISPATCH_LEVEL
+ * request already asked for the scheduler's turn, which picks the same
+ * thread when there is nothing else to do */
+static uint64_t HalClearSoftwareInterrupt(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
     return 0;
 }
 
@@ -255,6 +300,10 @@ void nc_intr_register(NcKernel *k)
     nc_kernel_impl(k, "KeConnectInterrupt", KeConnectInterrupt);
     nc_kernel_impl(k, "KeDisconnectInterrupt", KeDisconnectInterrupt);
     nc_kernel_impl(k, "KeSynchronizeExecution", KeSynchronizeExecution);
+    nc_kernel_impl(k, "HalEnableSystemInterrupt", HalEnableSystemInterrupt);
+    nc_kernel_impl(k, "HalDisableSystemInterrupt", HalDisableSystemInterrupt);
+    nc_kernel_impl(k, "HalRequestSoftwareInterrupt", HalRequestSoftwareInterrupt);
+    nc_kernel_impl(k, "HalClearSoftwareInterrupt", HalClearSoftwareInterrupt);
 }
 
 void nc_intr_reset(void)

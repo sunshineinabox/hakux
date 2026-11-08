@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Generate Linux release notes from CHANGELOG.md, with install and build links.
 Fail if the version has no changelog section.
     python3 tools/native/linux-release-notes.py <version> <commit> [<previous tag> [<run url>]]

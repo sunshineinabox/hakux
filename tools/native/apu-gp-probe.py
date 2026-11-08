@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 """The GP probe's recording (native/dev/apu/dsp/gp_probe.c, NC_APU_GP_PROBE)
 read back: for each tone, which bin it went into, and the level and phase
 of that tone in every output the GP and EP gave, each output's channels

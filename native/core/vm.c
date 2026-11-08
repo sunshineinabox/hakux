@@ -20,6 +20,27 @@ static uint8_t *g_na;   /* per physical page: no guest access (nc_vm_noaccess), 
  * decode thread closing it again must leave the table as the host has it. */
 static pthread_mutex_t g_prot_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Large-PDE RAM aliases stay outside rmap and share page protections.
+ * One slot per PDE covers the full 4 GiB address space. */
+#define MAX_ALIASES 1024
+typedef struct Alias {
+    uint32_t va, pa, len;
+} Alias;
+static Alias g_alias[MAX_ALIASES];
+static unsigned g_nalias;
+
+/* Remove aliases fully inside [va, va + len). Requires g_prot_lock. */
+static void alias_drop(uint32_t va, uint32_t len)
+{
+    for (unsigned i = 0; i < g_nalias;) {
+        if (g_alias[i].va >= va && (uint64_t)g_alias[i].va + g_alias[i].len <= (uint64_t)va + len) {
+            g_alias[i] = g_alias[--g_nalias];
+        } else {
+            i++;
+        }
+    }
+}
+
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 1u
 #endif
@@ -136,6 +157,7 @@ void nc_vm_destroy(NcVm *vm)
     free(vm->pin);
     free(g_na);
     g_na = NULL;
+    g_nalias = 0;
     memset(vm, 0, sizeof(*vm));
     vm->ram_fd = -1;
     nc_vm_write_hook = NULL;
@@ -191,7 +213,38 @@ int nc_vm_view_prot(NcVm *vm, uint32_t va, uint32_t len, int prot)
     return r;
 }
 
+static bool map_range(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len, bool view);
+
 bool nc_vm_map(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len)
+{
+    return map_range(vm, va, pa, len, va == NC_CONTIG_WINDOW || va == NC_GPU_WINDOW);
+}
+
+bool nc_vm_map_alias(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len)
+{
+    pthread_mutex_lock(&g_prot_lock);
+    alias_drop(va, len);
+    const bool room = g_nalias < MAX_ALIASES;
+    if (room) {
+        g_alias[g_nalias++] = (Alias){va, pa, len};
+    }
+    pthread_mutex_unlock(&g_prot_lock);
+    if (!room) {
+        /* A normal mapping would overwrite the physical page owner in rmap. */
+        nc_log("hakuX-native", "vm: no room for another view of RAM: %08x -> pa %08x left unmapped", va, pa);
+        return false;
+    }
+    if (!map_range(vm, va, pa, len, true)) {
+        pthread_mutex_lock(&g_prot_lock);
+        alias_drop(va, len);
+        pthread_mutex_unlock(&g_prot_lock);
+        return false;
+    }
+    return true;
+}
+
+/* Windows and aliases are views, not physical-page owners. */
+static bool map_range(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len, bool view)
 {
     if ((va | pa | len) & (NC_PAGE - 1) || (uint64_t)pa + len > vm->ram_size ||
         (uint64_t)va + len > (1ull << 32)) {
@@ -207,11 +260,10 @@ bool nc_vm_map(NcVm *vm, uint32_t va, uint32_t pa, uint32_t len)
                strerror(errno));
         return false;
     }
-    const bool window = va == NC_CONTIG_WINDOW || va == NC_GPU_WINDOW;
     for (uint32_t off = 0; off < len; off += NC_PAGE) {
         const uint32_t page = (pa + off) / NC_PAGE;
         vm->pte[(va + off) / NC_PAGE] = (pa + off) | NC_PTE_VALID;
-        if (!window) {
+        if (!view) {
             /* A page at a second address: two allocations sharing it corrupt each other. */
             const uint32_t prev = vm->rmap[page];
             if (prev && prev != va + off && vm->pte[prev / NC_PAGE] == ((pa + off) | NC_PTE_VALID)) {
@@ -245,14 +297,31 @@ void (*nc_vm_read_hook)(uint32_t va, uint32_t len);
 void (*nc_vm_free_hook)(uint32_t pa, uint32_t len);
 NcVmDma nc_vm_dma;
 
-/* Pages [page, page + n)'s guest views (the contiguous and GPU windows, the
- * user mappings in rmap as runs of consecutive VAs): prot. */
-
+/* Apply protection to both windows, RAM aliases, and the owner in rmap. */
 static void prot_views(NcVm *vm, uint32_t page, uint32_t n, int prot)
 {
     pthread_mutex_lock(&g_prot_lock);
     view_prot(vm, NC_CONTIG_WINDOW + page * NC_PAGE, n * NC_PAGE, prot);
     view_prot(vm, NC_GPU_WINDOW + page * NC_PAGE, n * NC_PAGE, prot);
+    for (unsigned a = 0; a < g_nalias; a++) {
+        const Alias *al = &g_alias[a];
+        const uint64_t end = (uint64_t)(page + n) * NC_PAGE, aend = (uint64_t)al->pa + al->len;
+        const uint32_t lo = page * NC_PAGE > al->pa ? page * NC_PAGE : al->pa;
+        const uint32_t hi = (uint32_t)(end < aend ? end : aend);
+        uint32_t start = 0, run = 0;
+        for (uint32_t p = lo; lo < hi && p <= hi; p += NC_PAGE) {
+            const uint32_t va = al->va + (p - al->pa);
+            if (p < hi && vm->pte[va / NC_PAGE] == (p | NC_PTE_VALID)) {
+                start = run ? start : va;
+                run++;
+                continue;
+            }
+            if (run) {
+                view_prot(vm, start, run * NC_PAGE, prot);
+            }
+            run = 0;
+        }
+    }
     uint32_t run_va = 0, run_n = 0;
     for (uint32_t i = 0; i <= n; i++) {
         uint32_t va = 0;
@@ -383,6 +452,7 @@ bool nc_vm_unmap(NcVm *vm, uint32_t va, uint32_t len)
         }
         vm->pte[(va + off) / NC_PAGE] = 0;
     }
+    alias_drop(va, len);
     prot_set(vm, va, len, PROT_NONE);
     pthread_mutex_unlock(&g_prot_lock);
     return true;

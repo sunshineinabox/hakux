@@ -261,16 +261,11 @@ static void step(NcKernel *k, NcFrame *f, NcThread *t)
     nc_frame_set_eip(f, rd(k, l->reg + 4));
 }
 
-/* RtlRaiseException(ExceptionRecord): first-chance dispatch from the caller. */
-static uint64_t RtlRaiseException(NcKernel *k, NcFrame *f, const uint32_t *a)
+/* Dispatches the level's record from a raise export's caller (stdcall, one
+ * argument): first chance, the context its return. */
+static void raise_from_caller(NcKernel *k, NcFrame *f, NcThread *t, NcSeh *l)
 {
-    NcThread *t = k->current;
     const uint32_t esp = nc_frame_gpr(f, NC_ESP), ret = rd(k, esp);
-    NcSeh *l = t ? push_level(k, f, t, esp) : NULL;
-    if (!l) {
-        return 0;
-    }
-    l->rec = a[0];
     capture(k, f, l->ctx, ret, esp + 8);
     wr(k, l->rec + ER_ADDRESS, ret);
     l->reg = chain_head(k);
@@ -288,6 +283,34 @@ static uint64_t RtlRaiseException(NcKernel *k, NcFrame *f, const uint32_t *a)
         }
     }
     step(k, f, t);
+}
+
+/* RtlRaiseException(ExceptionRecord), and ExRaiseException: first-chance
+ * dispatch from the caller. */
+static uint64_t RtlRaiseException(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    NcThread *t = k->current;
+    NcSeh *l = t ? push_level(k, f, t, nc_frame_gpr(f, NC_ESP)) : NULL;
+    if (l) {
+        l->rec = a[0];
+        raise_from_caller(k, f, t, l);
+    }
+    return 0;
+}
+
+/* RtlRaiseStatus(Status), and ExRaiseStatus: raises {Status, noncontinuable}
+ * from the caller. */
+static uint64_t RtlRaiseStatus(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    NcThread *t = k->current;
+    NcSeh *l = t ? push_level(k, f, t, nc_frame_gpr(f, NC_ESP)) : NULL;
+    if (l) {
+        l->rec = l->base + LV_REC;
+        memset(nc_vm_host(k->vm, l->rec), 0, ER_SIZE);
+        wr(k, l->rec + ER_CODE, a[0]);
+        wr(k, l->rec + ER_FLAGS, EXCEPTION_NONCONTINUABLE);
+        raise_from_caller(k, f, t, l);
+    }
     return 0;
 }
 
@@ -452,6 +475,116 @@ static void own_handler(NcKernel *k, NcFrame *f, bool unwind)
     nc_frame_set_eip(f, rd(k, esp));
 }
 
+/* ------------------------------------------------- contexts, stack walks */
+
+static bool mapped(NcKernel *k, uint32_t va)
+{
+    return nc_vm_phys(k->vm, va) != UINT32_MAX && nc_vm_phys(k->vm, va + 7) != UINT32_MAX;
+}
+
+/* RtlCaptureContext(ContextRecord): the caller's registers as its own return
+ * will leave them, from its EBP frame: Eip and Ebp the frame's saved ones,
+ * Esp above them. ContextFlags and the float area stay as they are. */
+static uint64_t RtlCaptureContext(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    const uint32_t c = a[0], esp = nc_frame_gpr(f, NC_ESP);
+    uint32_t bp = nc_frame_gpr(f, NC_EBP), eip = rd(k, esp), sp = esp + 8;
+    if (mapped(k, bp)) {
+        eip = rd(k, bp + 4);
+        sp = bp + 8;
+        bp = rd(k, bp);
+    }
+    wr(k, c + CX_EDI, nc_frame_gpr(f, NC_EDI));
+    wr(k, c + CX_ESI, nc_frame_gpr(f, NC_ESI));
+    wr(k, c + CX_EBX, nc_frame_gpr(f, NC_EBX));
+    wr(k, c + CX_EDX, nc_frame_gpr(f, NC_EDX));
+    wr(k, c + CX_ECX, nc_frame_gpr(f, NC_ECX));
+    wr(k, c + CX_EAX, nc_frame_gpr(f, NC_EAX));
+    wr(k, c + CX_EBP, bp);
+    wr(k, c + CX_EIP, eip);
+    wr(k, c + CX_CS, nc_frame_cs(f));
+    wr(k, c + CX_EFLAGS, nc_frame_eflags(f));
+    wr(k, c + CX_ESP, sp);
+    wr(k, c + CX_SS, 0x10);
+    return 0;
+}
+
+/* The return addresses up the stack from a kernel call into pcs (at most
+ * max): the call's own, then each EBP frame's while the frames stay inside
+ * the thread's stack (the TIB's limits) and go up. Returns how many. */
+static unsigned walk_frames(NcKernel *k, NcFrame *f, uint32_t *pcs, unsigned max)
+{
+    const uint32_t base = rd(k, k->kpcr_va + 4), limit = rd(k, k->kpcr_va + 8);
+    unsigned n = 0;
+    if (max) {
+        pcs[n++] = rd(k, nc_frame_gpr(f, NC_ESP));
+    }
+    uint32_t bp = nc_frame_gpr(f, NC_EBP);
+    while (n < max && bp >= limit && bp < base && base - bp >= 8 && !(bp & 3) && mapped(k, bp)) {
+        const uint32_t up = rd(k, bp), eip = rd(k, bp + 4);
+        if (eip < 0x10000 || (eip >= limit && eip < base)) {
+            break;
+        }
+        pcs[n++] = eip;
+        if (up <= bp) {
+            break;
+        }
+        bp = up;
+    }
+    return n;
+}
+
+#define WALK_MAX 128u
+
+/* RtlWalkFrameChain(Callers, Count, Flags) -> how many of Callers it filled
+ * (at most WALK_MAX), the return address into the caller first */
+static uint64_t RtlWalkFrameChain(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    uint32_t pcs[WALK_MAX];
+    const unsigned n = walk_frames(k, f, pcs, a[1] < WALK_MAX ? a[1] : WALK_MAX);
+    for (unsigned i = 0; i < n; i++) {
+        wr(k, a[0] + 4 * i, pcs[i]);
+    }
+    return n;
+}
+
+/* RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture, BackTrace, BackTraceHash)
+ * -> frames captured, the return address into the caller being frame 0; the
+ * hash is their sum. None when FramesToSkip + FramesToCapture reach 127. */
+static uint64_t RtlCaptureStackBackTrace(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    const uint64_t skip = a[0], want = a[1];
+    if (skip + want >= WALK_MAX - 1) {
+        return 0;
+    }
+    uint32_t pcs[WALK_MAX];
+    const unsigned n = walk_frames(k, f, pcs, (unsigned)(skip + want));
+    uint32_t i = 0, hash = 0;
+    for (; i < want && skip + i < n; i++) {
+        wr(k, a[2] + 4 * i, pcs[skip + i]);
+        hash += pcs[skip + i];
+    }
+    if (n > skip && a[3]) {
+        wr(k, a[3], hash);
+    }
+    return i;
+}
+
+/* RtlGetCallersAddress(CallersAddress, CallersCaller): the return addresses of
+ * the function that called it and of that one's caller, NULL past the stack */
+static uint64_t RtlGetCallersAddress(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    uint32_t pcs[3];
+    const unsigned n = walk_frames(k, f, pcs, 3);
+    if (a[0]) {
+        wr(k, a[0], n > 1 ? pcs[1] : 0);
+    }
+    if (a[1]) {
+        wr(k, a[1], n > 2 ? pcs[2] : 0);
+    }
+    return 0;
+}
+
 void nc_seh_stub(NcKernel *k, NcFrame *f, unsigned ordinal)
 {
     if (ordinal == NC_KORDINAL_SEH_RETURN) {
@@ -464,5 +597,12 @@ void nc_seh_stub(NcKernel *k, NcFrame *f, unsigned ordinal)
 void nc_seh_register(NcKernel *k)
 {
     nc_kernel_impl(k, "RtlRaiseException", RtlRaiseException);
+    nc_kernel_impl(k, "ExRaiseException", RtlRaiseException);
+    nc_kernel_impl(k, "RtlRaiseStatus", RtlRaiseStatus);
+    nc_kernel_impl(k, "ExRaiseStatus", RtlRaiseStatus);
     nc_kernel_impl(k, "RtlUnwind", RtlUnwind);
+    nc_kernel_impl(k, "RtlCaptureContext", RtlCaptureContext);
+    nc_kernel_impl(k, "RtlWalkFrameChain", RtlWalkFrameChain);
+    nc_kernel_impl(k, "RtlCaptureStackBackTrace", RtlCaptureStackBackTrace);
+    nc_kernel_impl(k, "RtlGetCallersAddress", RtlGetCallersAddress);
 }

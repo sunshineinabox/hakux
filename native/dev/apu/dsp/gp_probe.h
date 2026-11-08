@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * hakuX native core — a diagnostic probe of the guest's GP program
  * (gp_probe.c): NC_APU_GP_PROBE=DIR, with NC_APU_DSP=1. Off, each call

@@ -1,6 +1,12 @@
 /* Copyright (C) 2026-present PortareOS */
-/* Paced silent output for Linux diagnostics. The emulated APU stays active. */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Paced silent output for Linux diagnostics. The emulated APU stays active.
+ * NC_AUDIO_DUMP=<file>: the mixed output is also written there, raw 48 kHz
+ * 16-bit stereo little-endian (ffmpeg -f s16le -ar 48000 -ac 2 -i <file>). */
 #include "native/dev/apu/apu_int.h"
+
+#include <stdio.h>
+#include <stdlib.h>
 
 static struct {
     uint32_t capacity;
@@ -12,6 +18,8 @@ static struct {
     uint32_t callbacks, short_callbacks;
     pthread_t thread;
     int quit;                   /* apu_out_close */
+    FILE *dump;                 /* NC_AUDIO_DUMP */
+    uint32_t dumped;            /* pushes since the last flush */
 } g_null = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
 int apu_out_queued(void)
@@ -22,11 +30,17 @@ int apu_out_queued(void)
 
 void apu_out_push(const void *frame, int bytes)
 {
-    (void)frame;
     uint64_t head = __atomic_load_n(&g_null.head, __ATOMIC_RELAXED);
     if (bytes < 0 || head + (uint64_t)bytes - __atomic_load_n(&g_null.tail, __ATOMIC_ACQUIRE) > g_null.capacity) {
         nc_log("hakuX-apu", "diagnostic audio: invalid push or ring overflow");
         abort();
+    }
+    if (g_null.dump) {          /* flushed every 64 frames: runs end by timeout, without a close */
+        fwrite(frame, 1, (size_t)bytes, g_null.dump);
+        if (++g_null.dumped >= 64) {
+            fflush(g_null.dump);
+            g_null.dumped = 0;
+        }
     }
     __atomic_store_n(&g_null.head, head + (uint64_t)bytes, __ATOMIC_RELEASE);
 }
@@ -94,6 +108,12 @@ int apu_out_open(int capacity_bytes, int samples, pthread_cond_t *wake)
         nc_log("hakuX-apu", "diagnostic audio thread failed: %d", error);
         abort();
     }
+    const char *dump = getenv("NC_AUDIO_DUMP");
+    if (dump && *dump && !g_null.dump) {
+        g_null.dump = fopen(dump, "wb");
+        nc_log("hakuX-apu", "diagnostic audio: writing the output to %s%s", dump,
+               g_null.dump ? "" : " failed");
+    }
     nc_log("hakuX-apu", "diagnostic audio: paced silent sink, 48000 Hz stereo, %d samples/callback", samples);
     return samples * 4;
 }
@@ -111,6 +131,10 @@ void apu_out_close(void)
     g_null.head = g_null.tail = 0;
     g_null.wake = NULL;
     pthread_mutex_unlock(&g_null.lock);
+    if (g_null.dump) {
+        fclose(g_null.dump);
+        g_null.dump = NULL;
+    }
 }
 
 void nc_audio_set_paused(bool on)

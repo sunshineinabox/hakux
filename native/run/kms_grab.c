@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * kms-grab — what the panel shows, as a PNG: the framebuffer an active KMS
  * plane scans out, read back through its dma-buf (root, beside whoever is

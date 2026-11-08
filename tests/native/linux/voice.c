@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The libretro core's Communicator (native/libretro/mic.c and audio.c) with
  * the real device (native/dev/xblc.c), the title's USB frames played here:
  * RetroArch's microphone opens only once the title reads the Communicator's

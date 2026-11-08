@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The native APU tests' fixture (apu_stereo.c, apu_resample.c): an APU over
  * a guest RAM of its own, voices set up and started by the PIO methods
  * DirectSound sends (mcpx_apu_vp_write), their samples read through an
@@ -213,10 +214,27 @@ static void frames(int n)
     frames_into(n, NULL);
 }
 
+/* Hardware attenuation curve from xemu #3105: interpolate between dB
+ * steps, then fade linearly from 48 dB to silence at 63 dB. */
 static float attenuation(uint16_t vol)
 {
-    return vol == 0xFFF ? 0.0f : powf(10.0f, vol / (64.0f * -20.0f));
+    uint32_t nodes[64];
+    for (int k = 0; k <= 48; k++) {
+        nodes[k] = (uint32_t)floor(4095.0 * pow(10.0, -k / 20.0) + 0.5);
+    }
+    for (int k = 49; k < 64; k++) {
+        nodes[k] = nodes[48] * (63 - k) / 15;
+    }
+    const int att = vol & 0xFFF;
+    if (att >= 63 * 64) {
+        return 0.0f;
+    }
+    const uint32_t n0 = nodes[att >> 6], n1 = nodes[(att >> 6) + 1];
+    return ((256 * n0 - 4 * (n0 - n1) * (att & 63)) >> 6) / 16384.0f;
 }
+
+/* HRIR tap 7Fh: 31/32 (a sign-magnitude minifloat, not normalized) */
+#define TAP_7F (31.0f / 32.0f)
 
 /* the monitor's 16-bit sample of x */
 static int pcm(float x)

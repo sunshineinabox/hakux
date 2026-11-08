@@ -357,7 +357,63 @@ static void install_fast_paths(NcKernel *k, uint8_t *km)
         k->tramp_va[e->ordinal] = NC_KERNEL_VA + off;
         off += (uint32_t)(fast[i].len + 4 + 15) & ~15u;
     }
+    /* KeQuerySystemTime(CurrentTime): KeSystemTime as the Xbox kernel reads
+     * it (KSYSTEM_TIME: LowPart, High1Time, High2Time; High1Time read first,
+     * High2Time after, read again until they match). Every kernel entry and
+     * the clock's millisecond interrupt (clock_thread) keep it current: its
+     * steps are the Xbox's, a millisecond. A title polling it made a kernel
+     * call each time, up to 140000 a second. */
+    const NcKExport *qst = export_named("KeQuerySystemTime"), *kst = export_named("KeSystemTime");
+    if (qst && kst && kst->abi == NC_KABI_DATA) {
+        const uint32_t t = k->data_va[kst->ordinal];
+        uint8_t sys_time[] = {
+            0x8B, 0x4C, 0x24, 0x04,               /* mov ecx, [esp+4]           */
+            0xA1, 0, 0, 0, 0,                     /* again: mov eax, [High1Time] */
+            0x8B, 0x15, 0, 0, 0, 0,               /* mov edx, [LowPart]         */
+            0x3B, 0x05, 0, 0, 0, 0,               /* cmp eax, [High2Time]       */
+            0x75, 0xED,                           /* jne again                  */
+            0x89, 0x11,                           /* mov [ecx], edx             */
+            0x89, 0x41, 0x04,                     /* mov [ecx+4], eax           */
+            0xC2, 0x04, 0x00,                     /* ret 4                      */
+        };
+        nc_wr32(sys_time + 5, t + 4);
+        nc_wr32(sys_time + 11, t);
+        nc_wr32(sys_time + 17, t + 8);
+        memcpy(km + off, sys_time, sizeof(sys_time));
+        k->tramp_va[qst->ordinal] = NC_KERNEL_VA + off;
+        off += (uint32_t)(sizeof(sys_time) + 15) & ~15u;
+    }
     k->code_next = NC_KERNEL_VA + off;
+}
+
+/* The pseudo-ordinals' stubs, in the order of their VAs. */
+static const uint16_t k_stub_ordinals[] = {
+    NC_KORDINAL_THREAD_RETURN, NC_KORDINAL_DPC_RETURN, NC_KORDINAL_CALLOUT_RETURN,
+    NC_KORDINAL_ISR_RETURN,    NC_KORDINAL_APC_RETURN, NC_KORDINAL_TRAP,
+    NC_KORDINAL_SEH_RETURN,    NC_KORDINAL_SEH_NESTED, NC_KORDINAL_SEH_COLLIDED,
+    NC_KORDINAL_CONT_RETURN};
+#define K_STUB_COUNT (sizeof(k_stub_ordinals) / sizeof(k_stub_ordinals[0]))
+_Static_assert(K_STUBS + 8 * (K_STUB_COUNT + 1) <= K_TRAMPS, "the stubs fit before the trampolines");
+/* The continuation stub's VA (not in NcKernel: its layout is a savestate's). */
+#define K_CONT_RETURN_VA (NC_KERNEL_VA + K_STUBS + 8 * K_STUB_COUNT)
+
+static void write_stubs(uint8_t *km)
+{
+    for (unsigned i = 0; i < K_STUB_COUNT; i++) {
+        uint8_t *s = km + K_STUBS + 8 * (i + 1);
+        s[0] = 0xCD;
+        s[1] = NC_KCALL_VECTOR;
+        s[2] = k_stub_ordinals[i] & 0xff;
+        s[3] = k_stub_ordinals[i] >> 8;
+    }
+}
+
+void nc_kernel_stubs_refresh(NcKernel *k)
+{
+    write_stubs(nc_vm_host(k->vm, NC_KERNEL_VA));
+    if (k->cpu) {
+        nc_cpu_invalidate(k->cpu, NC_KERNEL_VA + K_STUBS, 8 * (K_STUB_COUNT + 1));
+    }
 }
 
 uint32_t nc_kernel_code_alloc(NcKernel *k, uint32_t len)
@@ -377,6 +433,10 @@ bool nc_kernel_init(NcKernel *k, NcVm *vm)
     if (!nc_vm_claim_phys(vm, NC_KERNEL_PA, NC_KERNEL_SIZE)) {
         nc_log("hakuX-native", "kernel: physical 0x%x-0x%x taken", NC_KERNEL_PA,
                NC_KERNEL_PA + NC_KERNEL_SIZE);
+        return false;
+    }
+    if (!nc_mm_hold_top(k)) {
+        nc_log("hakuX-native", "kernel: the top of RAM is taken");
         return false;
     }
     uint8_t *km = nc_vm_host(vm, NC_KERNEL_VA);
@@ -439,21 +499,13 @@ bool nc_kernel_init(NcKernel *k, NcVm *vm)
      * kernel runs (int 0x3F with a pseudo-ordinal), 8 bytes apart. */
     k->stop_va = NC_KERNEL_VA + K_STUBS;
     km[K_STUBS] = 0xF4;
-    static const uint16_t stub_ordinals[9] = {
-        NC_KORDINAL_THREAD_RETURN, NC_KORDINAL_DPC_RETURN, NC_KORDINAL_CALLOUT_RETURN,
-        NC_KORDINAL_ISR_RETURN,    NC_KORDINAL_APC_RETURN, NC_KORDINAL_TRAP,
-        NC_KORDINAL_SEH_RETURN,    NC_KORDINAL_SEH_NESTED, NC_KORDINAL_SEH_COLLIDED};
     uint32_t *const stub_va[9] = {&k->thread_return_va, &k->dpc_return_va, &k->callout_return_va,
                                   &k->isr_return_va,    &k->apc_return_va, &k->trap_va,
                                   &k->seh_return_va,    &k->seh_nested_va, &k->seh_collided_va};
     for (unsigned i = 0; i < 9; i++) {
         *stub_va[i] = NC_KERNEL_VA + K_STUBS + 8 * (i + 1);
-        uint8_t *s = km + K_STUBS + 8 * (i + 1);
-        s[0] = 0xCD;
-        s[1] = NC_KCALL_VECTOR;
-        s[2] = stub_ordinals[i] & 0xff;
-        s[3] = stub_ordinals[i] >> 8;
     }
+    write_stubs(km);
 
     /* Processor control region (fs:). KPCR: NT_TIB at 0 (ExceptionList,
      * StackBase, StackLimit, ...), SelfPcr 0x1C, Prcb 0x20, Irql 0x24, PRCB at
@@ -489,11 +541,20 @@ bool nc_kernel_init(NcKernel *k, NcVm *vm)
         [NC_OB_SEMAPHORE] = "ExSemaphoreObjectType", [NC_OB_MUTANT] = "ExMutantObjectType",
         [NC_OB_TIMER] = "ExTimerObjectType",         [NC_OB_FILE] = "IoFileObjectType",
         [NC_OB_DEVICE] = "IoDeviceObjectType",       [NC_OB_SYMLINK] = "ObSymbolicLinkObjectType",
-        [NC_OB_DIRECTORY] = "ObDirectoryObjectType",
+        [NC_OB_DIRECTORY] = "ObDirectoryObjectType",  [NC_OB_IO_COMPLETION] = "IoCompletionObjectType",
+    };
+    /* OBJECT_TYPE's PoolTag (+0x18), which NtQueryDirectoryObject reports */
+    static const char type_tags[NC_OB_TYPES][5] = {
+        [NC_OB_THREAD] = "Thre", [NC_OB_EVENT] = "Even", [NC_OB_SEMAPHORE] = "Sema", [NC_OB_MUTANT] = "Muta",
+        [NC_OB_TIMER] = "Time",  [NC_OB_FILE] = "File",  [NC_OB_DEVICE] = "Devi",    [NC_OB_SYMLINK] = "Symb",
+        [NC_OB_DIRECTORY] = "Dire", [NC_OB_IO_COMPLETION] = "Comp",
     };
     for (unsigned i = 0; i < NC_OB_TYPES; i++) {
         const NcKExport *e = export_named(type_names[i]);
         k->type_va[i] = e ? k->data_va[e->ordinal] : 0;
+        if (k->type_va[i]) {
+            memcpy(nc_vm_host(vm, k->type_va[i] + 0x18), type_tags[i], 4);
+        }
     }
 
     nc_ob_register(k);
@@ -502,11 +563,14 @@ bool nc_kernel_init(NcKernel *k, NcVm *vm)
     nc_mm_register(k);
     nc_ex_register(k);
     nc_rtl_register(k);
+    nc_rtlstr_register(k);
+    nc_misc_register(k);
     nc_seh_register(k);
     nc_timer_register(k);
     nc_intr_register(k);
     nc_apc_register(k);
     nc_io_register(k);
+    nc_iomgr_register(k);
     nc_xc_register(k);
 
     /* Data exports read at boot. */
@@ -877,6 +941,121 @@ void nc_kernel_callout(NcKernel *k, NcFrame *f, uint32_t routine, const uint32_t
     k->redirected = true;
 }
 
+/* ------------------------------------------------- kernel continuations */
+
+#define KCONT_MAGIC 0x544E434Bu /* "KCNT" */
+enum { KCONT_REC_MAGIC, KCONT_REC_ID, KCONT_REC_POP, KCONT_REC_EBX, KCONT_REC_CTX };
+#define KCONT_REC_BYTES (4u * (KCONT_REC_CTX + NC_KCONT_WORDS))
+
+static NcKCont g_kcont[NC_KCONT_MAX];
+
+void nc_kernel_cont(enum NcKContId id, NcKCont fn)
+{
+    g_kcont[id] = fn;
+}
+
+/* The record under the call's frame, a callout slot for the call's return,
+ * and EBX at the record; returns the record's VA (0: no room for a slot). */
+static uint32_t kcont_push(NcKernel *k, NcFrame *f, enum NcKContId id, const uint32_t ctx[NC_KCONT_WORDS])
+{
+    NcThread *t = k->current;
+    const uint32_t esp = nc_frame_gpr(f, NC_ESP);
+    if (!t || t->ncallouts == NC_MAX_CALLOUTS) {
+        nc_kernel_request_stop(k, f, "continuation %u: nesting too deep", id);
+        return 0;
+    }
+    t->callout_ret[t->ncallouts] = nc_vm_rd32(k->vm, esp);
+    t->callout_esp[t->ncallouts] = esp + k->call_pop;
+    t->callout_irql[t->ncallouts] = 0xFF;
+    t->ncallouts++;
+    const uint32_t rec = esp - 16 - KCONT_REC_BYTES;
+    nc_vm_wr32(k->vm, rec + 4 * KCONT_REC_MAGIC, KCONT_MAGIC);
+    nc_vm_wr32(k->vm, rec + 4 * KCONT_REC_ID, id);
+    nc_vm_wr32(k->vm, rec + 4 * KCONT_REC_POP, k->call_pop);
+    nc_vm_wr32(k->vm, rec + 4 * KCONT_REC_EBX, nc_frame_gpr(f, NC_EBX));
+    for (unsigned i = 0; i < NC_KCONT_WORDS; i++) {
+        nc_vm_wr32(k->vm, rec + 4 * (KCONT_REC_CTX + i), ctx ? ctx[i] : 0);
+    }
+    nc_frame_set_gpr(f, NC_EBX, rec);
+    k->redirected = true;
+    return rec;
+}
+
+void nc_kernel_callout_cont(NcKernel *k, NcFrame *f, uint32_t routine, const uint32_t *args, unsigned nargs,
+                            uint8_t irql, enum NcKContId id, const uint32_t ctx[NC_KCONT_WORDS])
+{
+    const uint32_t rec = kcont_push(k, f, id, ctx);
+    if (!rec) {
+        return;
+    }
+    uint32_t sp = rec - 16 - 4 * nargs;
+    nc_vm_wr32(k->vm, sp, K_CONT_RETURN_VA);
+    for (unsigned i = 0; i < nargs; i++) {
+        nc_vm_wr32(k->vm, sp + 4 + 4 * i, args[i]);
+    }
+    if (irql != 0xFF) {
+        NcThread *t = k->current;
+        t->callout_irql[t->ncallouts - 1] = *pcr_irql(k);
+        *pcr_irql(k) = irql;
+    }
+    nc_frame_set_gpr(f, NC_ESP, sp);
+    nc_frame_set_eip(f, routine);
+}
+
+void nc_kernel_wait_cont(NcKernel *k, NcFrame *f, enum NcKContId id, const uint32_t ctx[NC_KCONT_WORDS])
+{
+    const uint32_t rec = kcont_push(k, f, id, ctx);
+    if (rec) {
+        nc_frame_set_gpr(f, NC_ESP, rec - 16);
+        nc_frame_set_eip(f, K_CONT_RETURN_VA);
+    }
+}
+
+/* The stub after a continuation's routine or wait: the kernel call's frame
+ * back, then the continuation, which returns to the call's caller as the
+ * call would have. */
+static void kcont_return(NcKernel *k, NcFrame *f)
+{
+    NcThread *t = k->current;
+    const uint32_t rec = nc_frame_gpr(f, NC_EBX);
+    uint32_t r[KCONT_REC_CTX + NC_KCONT_WORDS];
+    for (unsigned i = 0; i < KCONT_REC_CTX + NC_KCONT_WORDS; i++) {
+        r[i] = nc_vm_rd32(k->vm, rec + 4 * i);
+    }
+    if (!t || !t->ncallouts || r[KCONT_REC_MAGIC] != KCONT_MAGIC || r[KCONT_REC_ID] >= NC_KCONT_MAX ||
+        !g_kcont[r[KCONT_REC_ID]]) {
+        nc_kernel_request_stop(k, f, "continuation return with no continuation at ebx=%08x", rec);
+        return;
+    }
+    nc_vm_wr32(k->vm, rec + 4 * KCONT_REC_MAGIC, 0);
+    t->ncallouts--;
+    const uint32_t pop = r[KCONT_REC_POP];
+    const uint32_t esp = t->callout_esp[t->ncallouts] - pop;
+    const uint32_t ret = t->callout_ret[t->ncallouts];
+    if (t->callout_irql[t->ncallouts] != 0xFF) {
+        *pcr_irql(k) = t->callout_irql[t->ncallouts];
+        if (*pcr_irql(k) < 2 && nc_dpc_pending()) {
+            k->resched = true;
+        }
+    }
+    const uint32_t eax = nc_frame_gpr(f, NC_EAX);
+    nc_frame_set_gpr(f, NC_EBX, r[KCONT_REC_EBX]);
+    nc_frame_set_gpr(f, NC_ESP, esp);
+    k->call_pop = pop;
+    k->frame = f;
+    k->redirected = false;
+    k->in_call = true;
+    const uint64_t v = g_kcont[r[KCONT_REC_ID]](k, f, eax, &r[KCONT_REC_CTX]);
+    k->in_call = false;
+    if ((t->state == NC_T_TERMINATED) || k->redirected) {
+        return;
+    }
+    nc_frame_set_gpr(f, NC_EAX, (uint32_t)v);
+    nc_frame_set_gpr(f, NC_EDX, (uint32_t)(v >> 32));
+    nc_frame_set_gpr(f, NC_ESP, esp + pop);
+    nc_frame_set_eip(f, ret);
+}
+
 /* ------------------------------------------------------------- the clock */
 
 static pthread_mutex_t g_clock_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1179,6 +1358,10 @@ static void kcall(NcKernel *k, NcFrame *f, unsigned ordinal)
         nc_apc_return(k, f);
         return;
     }
+    if (ordinal == NC_KORDINAL_CONT_RETURN) {
+        kcont_return(k, f);
+        return;
+    }
     if (ordinal == NC_KORDINAL_ISR_RETURN) {
         nc_intr_return(k);
         return;
@@ -1203,7 +1386,7 @@ static void kcall(NcKernel *k, NcFrame *f, unsigned ordinal)
         /* As the kernel's thread startup does when the start routine returns. */
         nc_log("hakuX-native", "ps: thread %u start routine returned (eax=%08x)",
                k->current ? k->current->id : 0, nc_frame_gpr(f, NC_EAX));
-        nc_ps_terminate_current(k, NC_STATUS_SUCCESS);
+        nc_ps_thread_returned(k, f);
         return;
     }
     const NcKExport *e = nc_kernel_export(ordinal);

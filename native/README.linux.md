@@ -38,10 +38,11 @@ including a sysroot or toolchain file.
 
 ### x86-64
 
-The same build runs on an x86-64 Linux host (`sh tools/native/linux-ci-x86_64.sh 0.17.0`,
-or `container run --arch amd64` with the image built for amd64). FEX translates
-for ARM64 only, so there the guest CPU is the KVM backend (`HAKUX_CPU=kvm`,
-issue #56): the title's code runs on the host CPU, at CPL 3 with IOPL 3, and
+On x86-64, the emulator uses KVM instead of FEX (`HAKUX_CPU=kvm`,
+issue #56). Build and test in the amd64 image with
+`sh tools/native/linux-ci-x86_64.sh 0.17.0` (`container run --arch amd64`).
+For host builds, set `HAKUX_SYSROOT=` to use host libraries and separate
+build directories; this skips release packaging. The guest code runs on the host CPU, at CPL 3 with IOPL 3, and
 its system instructions come to the kernel as they do from FEX. It needs
 `/dev/kvm` with TSC scaling and UMIP (`container run` on a Mac has neither:
 build there, run on an x86-64 Linux machine or in CI, which hands the
@@ -108,7 +109,10 @@ Use a positive `NC_TIMEOUT`. Headless mode disables graphics and audio
 output and stores the emulated disk and caches in the supplied directory.
 Use `--render` to render without a display and capture frames to
 `<data directory>/frames/` every 2 seconds (`NC_CAPTURE_EVERY`, limited by
-`NC_CAPTURE_MAX`). Accepts XISO/full-dump `.iso` files and DVD CHDs.
+`NC_CAPTURE_MAX`). `NC_AUDIO_DUMP=<file>` writes the audio output there
+as well, raw 48 kHz 16-bit stereo (`ffmpeg -f s16le -ar 48000 -ac 2 -i
+<file> out.wav`); `NC_APU_DSP=1` selects the full DSP, 0 the fast dry mix.
+Accepts XISO/full-dump `.iso` files and DVD CHDs.
 
 `vulkan-probe` checks renderer requirements and creates a device. It does
 not render, create a surface or verify shared-memory imports.
@@ -260,6 +264,12 @@ clean checkout of the release commit, in the same image:
 HAKUX_VERSION=0.17.0 CC=clang-19 CXX=clang++-19 sh tools/native/linux-build.sh
 CC=clang-19 sh tools/native/linux-package.sh 0.17.0
 ```
+
+For x86-64 releases, use `sh tools/native/linux-ci-x86_64.sh 0.17.0`
+or pass `-DCMAKE_SYSROOT=/opt/sysroot-jammy` to `linux-build.sh`. This
+links against Ubuntu 22.04's runtimes. Without the sysroot, a build may
+require newer host libraries. `BUILD-INFO` records the actual glibc
+requirement from the core's symbol versions.
 
 This writes `build/package/hakux-0.17.0-aarch64.tar.gz` on ARM64 or
 `build/package/hakux-0.17.0-x86_64.tar.gz` on x86-64, and prints its

@@ -4,6 +4,7 @@
 #include "glib.h"
 
 #include "native/core/nc.h"
+#include "native/core/libc_compat.h"
 
 #include <stdarg.h>
 

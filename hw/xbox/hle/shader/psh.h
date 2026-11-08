@@ -47,7 +47,7 @@ typedef struct HlePshKey {
     uint32_t rgb_in[8], rgb_out[8], alpha_in[8], alpha_out[8];
     uint32_t final_abcd, final_efg;
     uint32_t count;                     /* PSCombinerCount */
-    uint32_t tex_modes;                 /* PSTextureModes */
+    uint32_t tex_modes;                 /* Texture modes in bits 0–19. Three clamp bits per stage above them. */
     uint32_t dot_map;                   /* PSDotMapping */
     uint32_t input_tex;                 /* PSInputTexture */
     uint32_t compare;                   /* PSCompareMode */
@@ -122,6 +122,7 @@ typedef struct HlePshKey {
      * dithers the result, as the NV2A dithers what the blend leaves. */
     uint8_t fblend;
     uint16_t fb_src, fb_dst, fb_op;
+    uint8_t precise;                    /* Reuse padding; keep the shader key size stable. */
     uint32_t fb_const;
     /* SET_ANTI_ALIASING_CONTROL on an antialiased target, which is emulated
      * as an image aa_grid's times as large (bits 0-1 xs, 2-3 ys; 0: no
@@ -132,6 +133,7 @@ typedef struct HlePshKey {
     uint8_t zclamp;                     /* a DOT_ZW draw's ZCLAMP_EN: its depth clamped to
                                            the range, else a fragment outside it rejected
                                            (0 for every other draw: no split key) */
+    uint8_t poly_smooth;                /* Smooth triangle edges using barycentric coverage. */
 } HlePshKey;
 #define HLE_PSH_RECT 0x10u              /* HlePshKey.vol: a linear texture kept to its size */
 
@@ -154,6 +156,9 @@ static inline unsigned hle_psh_zrep(uint32_t tex_modes)
  * with every sample in the mask and neither alpha-to-coverage nor
  * alpha-to-one. */
 void hle_psh_aa_key(HlePshKey *k, uint32_t aactl, uint32_t xs, uint32_t ys, bool colour, bool depth);
+
+/* Configure precision before starting a game. Shader keys record the mode. */
+void hle_psh_set_precision(bool enabled);
 
 /* Key from the render-state array (rs[0..56] = the pixel-shader block). */
 void hle_psh_key(const uint32_t *rs, HlePshKey *k);

@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * hakuX native core — CHD disc images through libchdr.
  *
@@ -166,6 +167,11 @@ static const uint8_t *hunk(NcChd *c, uint32_t i)
     }
     c->tag[s] = i + 1;
     return p;
+}
+
+uint64_t nc_chd_size(const NcChd *c)
+{
+    return c->size;
 }
 
 bool nc_chd_read(NcChd *c, void *buf, size_t len, uint64_t off)

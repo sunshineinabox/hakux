@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * The KVM backend's first milestone (#56): each thing the backend does,
  * with guest code written for it and a system-op callback that records

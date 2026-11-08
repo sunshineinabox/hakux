@@ -33,9 +33,10 @@ enum {
     RS_WIREFRAMEOFFSETENABLE = 80, RS_SOLIDOFFSETENABLE = 81,
     RS_FOGENABLE = 92, RS_FOGTABLEMODE = 93, RS_FOGSTART = 94, RS_FOGEND = 95,
     RS_FOGDENSITY = 96, RS_SPECULARENABLE = 103, RS_POINTSPRITEENABLE = 118,
-    RS_FOGCOLOR = 138, RS_TWOSIDEDLIGHTING = 141, RS_ZENABLE = 143, RS_STENCILENABLE = 144,
-    RS_STENCILFAIL = 145,
-    RS_FRONTFACE = 146, RS_CULLMODE = 147, RS_SHADOWFUNC = 156, RS_LINEWIDTH = 157,
+    RS_FOGCOLOR = 138, RS_FILLMODE = 139, RS_BACKFILLMODE = 140, RS_TWOSIDEDLIGHTING = 141,
+    RS_ZENABLE = 143, RS_STENCILENABLE = 144, RS_STENCILFAIL = 145,
+    RS_FRONTFACE = 146, RS_CULLMODE = 147, RS_LOGICOP = 150, RS_EDGEANTIALIAS = 151, RS_SHADOWFUNC = 156,
+    RS_LINEWIDTH = 157,
 };
 enum {
     TSS_ADDRESSU = 0, TSS_ADDRESSV, TSS_ADDRESSW, TSS_MAGFILTER, TSS_MINFILTER,
@@ -133,6 +134,14 @@ void hle_kelvin_method(uint32_t m, uint32_t v)
     if (__builtin_expect(!g_state_read_ready, 0)) {
         state_read_init();
     }
+    /* Invalid logic-op writes leave the previous state intact (envytools hwtest). */
+    if ((m == 0x17C0 && (v < 0x1500 || v > 0x150F)) || (m == 0x17BC && v > 1)) {
+        static unsigned s_logged;
+        if (s_logged++ < 4) {
+            hle_log("hakuX-hle-pb", "%s 0x%x refused", m == 0x17C0 ? "SET_LOGIC_OP" : "SET_LOGIC_OP_ENABLE", v);
+        }
+        return;
+    }
     if (m == 0x0380 && v >= 0x200) {
         /* SET_LINE_WIDTH past its 6.3 bits: the NV2A refuses the method (a
          * warning, envytools' hwtest) and keeps the width it had */
@@ -187,7 +196,9 @@ static void tss(uint32_t *t, unsigned s)
     int32_t lod = (int32_t)(filt << 19) >> 19;          /* signed 5.8 */
     float bias = lod / 256.0f;
     memcpy(&t[TSS_MIPMAPLODBIAS], &bias, 4);
-    t[TSS_MAXMIPLEVEL] = (ctl0 >> 26) & 0xF;            /* min LOD clamp, 4.8 */
+    /* Pack the minimum's integer and fractional parts in bits 0–3 and 8–15.
+     * Bits 16–27 hold the 4.8 maximum. */
+    t[TSS_MAXMIPLEVEL] = ((ctl0 >> 26) & 0xF) | ((ctl0 >> 18) & 0xFF) << 8 | ((ctl0 >> 6) & 0xFFF) << 16;
     t[TSS_COLORKEYOP] = ctl0 & 3;
     t[TSS_COLORKEYCOLOR] = R(0x0AE0 + 4 * s);           /* SET_COLOR_KEY_COLOR */
     t[TSS_ALPHAKILL] = (ctl0 >> 2) & 1;
@@ -221,6 +232,8 @@ static const struct { uint16_t m, rs; } k_rs_map[] = {
     { 0x0310, RS_DITHERENABLE },        /* SET_DITHER_ENABLE */
     { 0x0380, RS_LINEWIDTH },           /* SET_LINE_WIDTH: 6.3 fixed point (< 0x200:
                                            hle_kelvin_method refuses the rest) */
+    /* Polygon modes: 0x1B00 point, 0x1B01 line, 0x1B02 fill. */
+    { 0x038C, RS_FILLMODE }, { 0x0390, RS_BACKFILLMODE },
 };
 
 void hle_kelvin_state(HleCmdState *st)
@@ -231,6 +244,8 @@ void hle_kelvin_state(HleCmdState *st)
             rs[k_rs_map[i].rs] = R(k_rs_map[i].m);
         }
     }
+    /* D3DRS_LOGICOP holds the active GL op, or zero when disabled. */
+    rs[RS_LOGICOP] = R(0x17BC) ? R(0x17C0) : 0;
     st->aactl = W(0x1D7C) ? R(0x1D7C) : 0xFFFF0001u;   /* SET_ANTI_ALIASING_CONTROL */
     static const float k_eye[3] = { 0.0f, 0.0f, -1.0f };
     for (unsigned i = 0; i < 3; i++) {  /* SET_EYE_VECTOR (envytools' TEX_SHADER_CONST_EYE) */
@@ -239,6 +254,10 @@ void hle_kelvin_state(HleCmdState *st)
         } else {
             st->eye[i] = k_eye[i];
         }
+    }
+    if (W(0x0320) || W(0x0324)) {
+        /* Store line and polygon smoothing in separate bits. */
+        rs[RS_EDGEANTIALIAS] = (R(0x0320) != 0) | (R(0x0324) != 0) << 1;
     }
     if (!W(0x0380)) {                   /* SET_LINE_WIDTH never written: 1.0 (an */
         rs[RS_LINEWIDTH] = 8;           /* explicit 0 draws no line, vk/draw.c) */

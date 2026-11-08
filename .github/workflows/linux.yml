@@ -1,4 +1,5 @@
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 # The libretro core for Linux (aarch64 and x86-64): built and checked in the
 # pinned image (tools/native/Dockerfile.linux) on every push and pull
 # request, both packages kept as the run's artifacts. A linux-v<version>
@@ -137,7 +138,7 @@ jobs:
         run: |
           previous=$(git describe --tags --abbrev=0 --match 'linux-v*' --exclude "$GITHUB_REF_NAME" "$GITHUB_SHA" 2>/dev/null || true)
           python3 tools/native/linux-release-notes.py "$VERSION" "$GITHUB_SHA" "$previous" "$RUN_URL" > notes.md
-          title="hakuX $VERSION for Linux (aarch64, x86-64)"
+          title="hakuX-lr $VERSION for Linux (aarch64, x86-64)"
           case "$VERSION" in
             *-exp*) title="$title — experimental" ;;
           esac

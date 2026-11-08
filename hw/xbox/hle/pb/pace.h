@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * hakuX HLE GPU — the frame pace's arithmetic (pb/pbdraw.c g_pace), pure
  * for the host tests. ring[k % n] holds the timeline value of swap k (from

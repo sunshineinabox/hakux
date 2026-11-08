@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "native/dev/apu/apu_int.h"
 #include <stdio.h>
 

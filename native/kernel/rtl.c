@@ -43,6 +43,11 @@ static uint32_t str_alloc(NcKernel *k, uint32_t size)
     return p + 16;
 }
 
+uint32_t nc_rtl_str_alloc(NcKernel *k, uint32_t size)
+{
+    return str_alloc(k, size);
+}
+
 static void str_free(NcKernel *k, uint32_t buf)
 {
     if (buf) {

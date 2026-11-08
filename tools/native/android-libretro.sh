@@ -1,5 +1,6 @@
 #!/bin/sh
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 # The libretro core for RetroArch on Android (arm64-v8a): built with the NDK
 # and packaged with its core info, stripped, with the licences and the
 # revisions it was built from, as
@@ -53,7 +54,7 @@ cp LICENSE COPYING licenses/* "$out/$name/licenses/"
     echo "compiler $("$bin/clang" --version | head -1) (NDK $(sed -n 's/^Pkg.Revision *= *//p' "$ndk/source.properties"))"
     echo "architecture arm64-v8a, Android 9 (API 28) or newer"
     echo "DSP JIT off"
-    echo "runtime libc, libm, libdl, libz, liblog, libandroid; Vulkan through RetroArch's loader"
+    echo "runtime libc, libm, libdl, libz, liblog, libandroid, libaaudio; Vulkan through RetroArch's loader"
     echo "dependencies (tools/native/linux-deps.json):"
     cat tools/native/linux-deps.json
 } > "$out/$name/BUILD-INFO"

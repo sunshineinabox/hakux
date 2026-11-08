@@ -306,6 +306,7 @@ void nc_kernel_section_fixups(NcKernel *k, uint32_t va, uint32_t len, const char
  * them had them (a build before a fixup, unpatched). */
 void nc_kernel_loaded_fixups(NcKernel *k)
 {
+    nc_kernel_stubs_refresh(k);
     const uint32_t base = k->xbe_base;
     const uint32_t nsec = nc_vm_rd32(k->vm, base + 0x11C), secs = nc_vm_rd32(k->vm, base + 0x120);
     for (uint32_t i = 0; i < nsec && i < 256; i++) {

@@ -336,7 +336,7 @@ uint64_t nc_timer_poll(NcKernel *k, bool *fired)
             /* delivered when the thread next waits alertably, as NT's user APCs */
             const NcApc apc = {.normal = g_timers[i].apc, .ctx = g_timers[i].apc_ctx,
                                .a1 = (uint32_t)systime, .a2 = (uint32_t)(systime >> 32)};
-            nc_apc_queue(k, at, &apc);
+            nc_apc_queue(k, at, &apc, 0);
         }
         *fired = true;
         if (g_timers[i].period_ns) {

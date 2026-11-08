@@ -1,5 +1,6 @@
 #!/bin/sh
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Sets up RetroArch with hakuX-lr for testing on an ARM64 or AMD64 Linux
 # machine, then writes start-hakux.sh, which starts games with it.
 #
@@ -190,14 +191,6 @@ else
     warn "libvulkan.so.1 (the Vulkan loader) is missing"
 fi
 
-glibc=$(ldd --version 2>/dev/null | sed -n '1s/.* \([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')
-if [ -n "$glibc" ]; then
-    gmaj=${glibc%%.*} gmin=${glibc#*.}
-    if [ "$gmaj" -lt 2 ] || { [ "$gmaj" -eq 2 ] && [ "$gmin" -lt 38 ]; }; then
-        warn "glibc $glibc is older than 2.38; the release core may not load"
-    fi
-fi
-
 # ------------------------------------------------------------- permissions
 
 user=$(id -un)
@@ -318,6 +311,17 @@ else
         cp "$rel/BUILD-INFO" "$prefix/licenses/" 2>/dev/null || true
     fi
 fi
+# Check this core's glibc requirement; it varies by architecture and build.
+glibc=$(ldd --version 2>/dev/null | sed -n '1s/.* \([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p')
+need=$(LC_ALL=C grep -ao 'GLIBC_2\.[0-9][0-9]*' "$tmp/hakux_libretro.so" | sort -u -t. -k2,2n | tail -n1)
+need=${need#GLIBC_2.}
+if [ -n "$glibc" ] && [ -n "$need" ]; then
+    gmaj=${glibc%%.*} gmin=${glibc#*.}
+    if [ "$gmaj" -lt 2 ] || { [ "$gmaj" -eq 2 ] && [ "$gmin" -lt "$need" ]; }; then
+        warn "glibc $glibc is older than 2.$need, which this core needs; RetroArch won't load it"
+    fi
+fi
+
 # Replace the files, never write into them: a running RetroArch keeps
 # the old core mapped.
 cp "$tmp/hakux_libretro.so" "$prefix/cores/.hakux_libretro.so.new"

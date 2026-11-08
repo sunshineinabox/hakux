@@ -1,10 +1,26 @@
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 FROM rust:1.99.1-slim-trixie@sha256:9daf2b244ccc30523e55cafe32edf8465671ba567d0101620e5612ccb76ea1a7 AS rust
+# Link AMD64 releases against Ubuntu 22.04's glibc and libstdc++.
+FROM ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11 AS sysroot
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libc6-dev libstdc++-11-dev libgcc-11-dev zlib1g-dev linux-libc-dev \
+    && rm -rf /var/lib/apt/lists/*
 FROM debian:stable-slim@sha256:a717a33469731894e77e912ea7d714e27c2dc38ee6554fd1a3102e92999cfc66
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential clang-19 clang-tools-19 lld-19 llvm-19 cmake ninja-build git python3 \
     pkg-config ca-certificates zlib1g-dev libvulkan1 mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=sysroot / /opt/sysroot-jammy
+# Keep absolute symlinks inside the sysroot.
+RUN find /opt/sysroot-jammy -type l -lname '/*' | while read -r l; do \
+        ln -sfn "$(realpath -m -s --relative-to="$(dirname "$l")" "/opt/sysroot-jammy$(readlink "$l")")" "$l"; \
+    done
+# Use newer kernel UAPI headers for KVM TSC control constants.
+RUN ma=$(dpkg-architecture -qDEB_HOST_MULTIARCH) && \
+    for d in linux asm-generic "$ma/asm"; do \
+        rm -rf "/opt/sysroot-jammy/usr/include/$d" && cp -RL "/usr/include/$d" "/opt/sysroot-jammy/usr/include/$d"; \
+    done
 COPY --from=rust /usr/local/cargo /usr/local/cargo
 COPY --from=rust /usr/local/rustup /usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup

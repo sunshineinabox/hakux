@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026-present PortareOS
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Check the libretro core: its exports, its info, and a synthetic title run through it."""
 import argparse
 import os
@@ -223,7 +224,7 @@ def main():
                                        'option: hakux_communicator (Xbox Live Communicator), default disabled',
                                        'option: hakux_mic_sensitivity (Communicator Microphone Sensitivity), '
                                        'default medium',
-                                       'option: hakux_audio_resampler (Audio Resampler), default sinc',
+                                       'option: hakux_audio_resampler (Audio Resampler), default hardware',
                                        f'option: hakux_audio_processing (Audio Processing), default {args.audio_default}',
                                        'option: hakux_frame_pace (Frame Pacing), default disabled'))
     with tempfile.TemporaryDirectory(prefix='hakux-libretro-') as folder:
@@ -518,12 +519,14 @@ def main():
         run([args.harness, args.core, root / 'back.iso', 600, root / 'saves'], 0,
             ('title returned to the firmware (routine 2', 'the core asked to shut down'))
         print("PASS: the dashboard booted with no content, through its relaunches")
-        # The audio resampler option reaches the APU before it starts: sinc by
-        # default (NEON on ARM64; on x86-64 AVX2+FMA or SSE2, the CPU's),
-        # linear when chosen
+        # Check the hardware default and the sinc and linear overrides.
+        run_without([args.harness, args.core, root / 'spin.iso', 30, root / 'saves'],
+                    ('resampler hardware', 'resampler: hardware (8-point Lagrange)', 'ran 30 frames'),
+                    ('not in this build',))
         sinc = 'resampler: sinc (32-tap Kaiser-windowed, ' + ('NEON)' if os.uname().machine == 'aarch64' else '')
         run_without([args.harness, args.core, root / 'spin.iso', 30, root / 'saves'],
-                    ('resampler sinc', sinc, 'ran 30 frames'), ('not in this build',))
+                    ('resampler sinc', sinc, 'ran 30 frames'), ('not in this build',),
+                    dict(os.environ, HARNESS_OPTIONS='hakux_audio_resampler=sinc'))
         run([args.harness, args.core, root / 'spin.iso', 30, root / 'saves'], 0,
             ('resampler linear', 'resampler: linear', 'ran 30 frames'),
             dict(os.environ, HARNESS_OPTIONS='hakux_audio_resampler=linear'))

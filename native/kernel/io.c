@@ -14,6 +14,7 @@
 #include "native/kernel/kernel.h"
 #include "native/kernel/xc_crypto.h"
 #include "native/core/irq.h"
+#include "native/core/chd.h"
 #include "native/core/xdvdfs.h"
 
 #include <ctype.h>
@@ -144,6 +145,7 @@ typedef struct NcFile {
  * cluster at +0x1C. */
 #define FILE_OBJECT_SIZE 0x70u
 #define FO_FSCONTEXT 0x08u
+#define FO_COMPLETION 0x20u /* CompletionContext: { Port, Key } (iomgr.c) */
 #define FO_LOCK 0x28u
 #define FO_INDEX 0x48u
 #define FO_FCB 0x4Cu
@@ -603,7 +605,7 @@ static void complete(NcKernel *k, const uint32_t *a)
     if (a[1]) {
         uint32_t ev = nc_ob_lookup(k, a[1], NULL);
         if (ev) {
-            nc_ke_set_event(k, ev);
+            nc_ke_set_event(k, ev, 1);
         }
     } else {
         /* no event of its own: the file object's, which a wait on the file
@@ -612,12 +614,19 @@ static void complete(NcKernel *k, const uint32_t *a)
         enum NcObType type;
         const uint32_t fo = nc_ob_lookup(k, a[0], &type);
         if (fo && type == NC_OB_FILE) {
-            nc_ke_set_event(k, fo + NC_FO_EVENT);
+            nc_ke_set_event(k, fo + NC_FO_EVENT, 1);
         }
     }
     if (a[2] && k->current) {
         const NcApc apc = {.normal = a[2], .ctx = a[3], .a1 = a[4], .a2 = 0};
-        nc_apc_queue(k, k->current, &apc);
+        nc_apc_queue(k, k->current, &apc, 1);
+    } else if (a[3] && a[4]) {
+        /* a file with a completion port gets the I/O's completion there */
+        enum NcObType type;
+        const uint32_t fo = nc_ob_lookup(k, a[0], &type);
+        if (fo && type == NC_OB_FILE) {
+            nc_iomgr_file_post(k, fo, a[3], nc_vm_rd32(k->vm, a[4]), nc_vm_rd32(k->vm, a[4] + 4));
+        }
     }
 }
 
@@ -712,6 +721,7 @@ typedef struct DiscJob {
     uint32_t va, n;
     uint32_t dev_us;         /* the drive's time for it (console timing), 0: none */
     uint32_t iosb, event, apc, apc_ctx;
+    uint32_t fo;             /* the file object (its completion port) */
     NcThread *thread;
     uint32_t thread_id;      /* its id then: the slot may hold another thread by the end */
     bool sync;               /* a synchronous handle's: the thread waits for it (nc_ke_block) */
@@ -821,20 +831,19 @@ static bool disc_read_later(NcKernel *k, const NcFile *nf, const uint32_t *a, co
         return false;
     }
     uint32_t event = 0;
+    enum NcObType type;
+    uint32_t fo = nc_ob_lookup(k, a[0], &type);
+    fo = fo && type == NC_OB_FILE ? fo : 0;
     if (a[1]) {
         event = nc_ob_lookup(k, a[1], NULL);
         if (!event) {
             return false;
         }
-    } else {
-        enum NcObType type;
-        const uint32_t fo = nc_ob_lookup(k, a[0], &type);
-        if (fo && type == NC_OB_FILE) {
-            event = fo + NC_FO_EVENT;
-        }
+    } else if (fo) {
+        event = fo + NC_FO_EVENT;
     }
     DiscJob j = {.disc = k->disc, .file = nf->disc, .fd = -1, .off = off, .va = run[0].va, .n = n,
-                 .dev_us = dev_us, .iosb = a[4], .event = event, .apc = a[2], .apc_ctx = a[3],
+                 .dev_us = dev_us, .iosb = a[4], .event = event, .apc = a[2], .apc_ctx = a[3], .fo = fo,
                  .thread = k->current, .thread_id = k->current ? k->current->id : 0, .sync = sync};
     snprintf(j.path, sizeof(j.path), "%s", nf->path);
     size_t segs = 0;
@@ -919,15 +928,17 @@ static void disc_read_done(NcKernel *k, const DiscJob *j)
     }
     io_status(k, j->iosb, st, n);
     if (j->event) {
-        nc_ke_set_event(k, j->event);
+        nc_ke_set_event(k, j->event, 1);
     }
     if (j->sync && j->thread && j->thread->id == j->thread_id && j->thread->state == NC_T_WAITING) {
-        nc_ke_wake(k, j->thread, st);   /* its NtReadFile returns now */
+        nc_ke_wake(k, j->thread, st, 1);   /* its NtReadFile returns now */
     }
     if (j->apc && j->thread && j->thread->id == j->thread_id && j->thread->state != NC_T_FREE &&
         j->thread->state != NC_T_TERMINATED) {
         const NcApc apc = {.normal = j->apc, .ctx = j->apc_ctx, .a1 = j->iosb, .a2 = 0};
-        nc_apc_queue(k, j->thread, &apc);
+        nc_apc_queue(k, j->thread, &apc, 1);
+    } else if (!j->apc && j->apc_ctx && j->fo) {
+        nc_iomgr_file_post(k, j->fo, j->apc_ctx, st, n);
     }
 }
 
@@ -1233,6 +1244,19 @@ static uint64_t NtOpenFile(NcKernel *k, NcFrame *f, const uint32_t *a)
     return st;
 }
 
+/* IoCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize,
+ *   FileAttributes, ShareAccess, Disposition, CreateOptions, Options): NtCreateFile's */
+static uint64_t IoCreateFile(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    /* TODO: IO_OPEN_TARGET_DIRECTORY (Options 4) opens the named file, not its directory */
+    static bool told;
+    if ((a[9] & 4) && !told) {
+        told = true;
+        nc_log("hakuX-native-io", "IoCreateFile with IO_OPEN_TARGET_DIRECTORY: the file itself opened");
+    }
+    return NtCreateFile(k, f, a);
+}
+
 /* --------------------------------------------------------- read, write */
 
 static uint64_t file_size(const NcFile *nf)
@@ -1305,6 +1329,19 @@ static uint64_t ExReadWriteRefurbInfo(NcKernel *k, NcFrame *f, const uint32_t *a
 static uint64_t IoDismountVolumeByName(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
     return NC_STATUS_SUCCESS;
+}
+
+/* IoDismountVolume(DeviceObject): as IoDismountVolumeByName */
+static uint64_t IoDismountVolume(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    return NC_STATUS_SUCCESS;
+}
+
+/* FscInvalidateIdleBlocks(): the file system cache's idle blocks dropped;
+ * the host's page cache serves the files, nothing of the kernel's to drop. */
+static uint64_t FscInvalidateIdleBlocks(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    return 0;
 }
 
 /* The offset an NtReadFile/NtWriteFile works at: ByteOffset, or the file position. */
@@ -1627,6 +1664,10 @@ static bool handle_can_write(const NcFile *nf, const char *what)
 }
 
 /* NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset) */
+/* NtWriteFile's and NtWriteFileGather's: a[] as NtWriteFile takes them, the
+ * data from src (a[6] bytes; the guest's, made readable). */
+static uint64_t write_from(NcKernel *k, const uint32_t *a, NcFile *nf, uint8_t *src);
+
 static uint64_t NtWriteFile(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
     NcFile *nf = file_of(k, a[0]);
@@ -1636,11 +1677,48 @@ static uint64_t NtWriteFile(NcKernel *k, NcFrame *f, const uint32_t *a)
     if (!nc_kernel_resident(k, a[5], a[6], false)) {
         return 0;
     }
+    nc_vm_will_read(a[5], a[6]);   /* a host write from a page without access fails rather than faults */
+    return write_from(k, a, nf, nc_vm_host(k->vm, a[5]));
+}
+
+/* NtWriteFileGather(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,
+ * SegmentArray, Length, ByteOffset): NtWriteFile from pages, SegmentArray
+ * holding a page's address for each page of Length (NtReadFileScatter's). */
+static uint64_t NtWriteFileGather(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    NcFile *nf = file_of(k, a[0]);
+    if (!nf) {
+        return NC_STATUS_INVALID_HANDLE;
+    }
+    const uint32_t len = a[6], pages = (uint32_t)(((uint64_t)len + NC_PAGE - 1) / NC_PAGE);
+    if (!nc_kernel_resident(k, a[5], pages * 4, false)) {
+        return 0;
+    }
+    uint8_t *buf = malloc(len ? len : 1);
+    if (!buf) {
+        return NC_STATUS_INSUFFICIENT_RESOURCES;
+    }
+    for (uint32_t i = 0; i < pages; i++) {
+        const uint32_t va = nc_vm_rd32(k->vm, a[5] + 4 * i) & ~(NC_PAGE - 1);
+        const uint32_t n = len - i * NC_PAGE < NC_PAGE ? len - i * NC_PAGE : NC_PAGE;
+        if (!nc_kernel_resident(k, va, n, false)) {
+            free(buf);
+            return 0;
+        }
+        nc_vm_will_read(va, n);
+        memcpy(buf + i * NC_PAGE, nc_vm_host(k->vm, va), n);
+    }
+    const uint64_t r = write_from(k, a, nf, buf);
+    free(buf);
+    return r;
+}
+
+static uint64_t write_from(NcKernel *k, const uint32_t *a, NcFile *nf, uint8_t *src)
+{
     if (nf->kind == F_VOLUME) {
         if (nf->partition == 0) {
             const uint64_t off = io_offset(k, nf, a[7]);
-            nc_vm_will_read(a[5], a[6]);
-            raw_io(0, off, nc_vm_host(k->vm, a[5]), a[6], true);
+            raw_io(0, off, src, a[6], true);
             io_moved(k, nf, a[7], off + a[6]);
             if (g_trace_io) {
                 nc_log("hakuX-native-io", "write %s raw +%llx %u", nf->path, (unsigned long long)off, a[6]);
@@ -1653,10 +1731,9 @@ static uint64_t NtWriteFile(NcKernel *k, NcFrame *f, const uint32_t *a)
          * write empties the folder; the head of the partition is kept. */
         const uint64_t o = io_offset(k, nf, a[7]);
         io_moved(k, nf, a[7], o + a[6]);
-        nc_vm_will_read(a[5], a[6]);
-        raw_io(partition_root(nf), o, nc_vm_host(k->vm, a[5]), a[6], true);
+        raw_io(partition_root(nf), o, src, a[6], true);
         /* The FATX superblock: "FATX", volume id, sectors per cluster. */
-        const uint8_t *sb = nc_vm_host(k->vm, a[5]);
+        const uint8_t *sb = src;
         if (o == 0 && a[6] >= 12 && !memcmp(sb, "FATX", 4)) {
             const int part = partition_root(nf);
             g_cluster_sectors[part] = nc_rd32(sb + 8);
@@ -1685,14 +1762,13 @@ static uint64_t NtWriteFile(NcKernel *k, NcFrame *f, const uint32_t *a)
             regrow(nf, size, off); /* the gap a write past the end leaves */
         }
     }
-    nc_vm_will_read(a[5], a[6]);   /* pwrite from a page without access fails rather than faults */
-    ssize_t n = pwrite(nf->fd, nc_vm_host(k->vm, a[5]), a[6], (off_t)off);
+    ssize_t n = pwrite(nf->fd, src, a[6], (off_t)off);
     uint32_t st = n == (ssize_t)a[6] ? NC_STATUS_SUCCESS : 0xC000007Fu; /* STATUS_DISK_FULL */
     nf->wrote |= n > 0;
     if (g_trace_io) {
         uint8_t b[8] = {0};
         if (n >= 8) {
-            memcpy(b, nc_vm_host(k->vm, a[5]), 8);
+            memcpy(b, src, 8);
         }
         nc_log("hakuX-native-io", "write %s +%llx %u from %08x -> %08x [%02x%02x%02x%02x %02x%02x%02x%02x]", nf->path,
                (unsigned long long)off, a[6], a[5], st, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
@@ -1751,17 +1827,48 @@ static void network_open_info(const NcFile *nf, uint8_t *o)
 }
 
 /* NtQueryInformationFile(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass) */
+static uint32_t query_file(NcKernel *k, NcFile *nf, uint32_t cls, uint32_t buf, uint32_t buf_len, uint32_t *out_len);
+
 static uint64_t NtQueryInformationFile(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
     NcFile *nf = file_of(k, a[0]);
     if (!nf) {
         return NC_STATUS_INVALID_HANDLE;
     }
+    uint32_t len = 0;
+    const uint32_t st = query_file(k, nf, a[4], a[2], a[3], &len);
+    if (st != STATUS_BUFFER_TOO_SMALL) {
+        io_status(k, a[1], st, len);
+    }
+    return st;
+}
+
+/* IoQueryFileInformation(FileObject, FileInformationClass, Length, FileInformation, ReturnedLength) */
+static uint64_t IoQueryFileInformation(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    if (!a[0] || nc_rd16(nc_vm_host(k->vm, a[0])) != 5) { /* IO_TYPE_FILE */
+        return NC_STATUS_INVALID_HANDLE;
+    }
+    const uint32_t i = nc_vm_rd32(k->vm, a[0] + FO_INDEX);
+    if (i >= MAX_FILES || !g_files[i].used) {
+        return NC_STATUS_INVALID_HANDLE;
+    }
+    uint32_t len = 0;
+    const uint32_t st = query_file(k, &g_files[i], a[1], a[3], a[2], &len);
+    if (a[4]) {
+        nc_vm_wr32(k->vm, a[4], st == NC_STATUS_SUCCESS ? len : 0);
+    }
+    return st;
+}
+
+/* A query of nf's class cls into buf (buf_len bytes); *out_len: the bytes it wrote. */
+static uint32_t query_file(NcKernel *k, NcFile *nf, uint32_t cls, uint32_t buf, uint32_t buf_len, uint32_t *out_len)
+{
     uint8_t o[0x38];                    /* the largest class's; the caller's buffer once it fits */
     uint64_t t[4], size;
     uint32_t attrs, len;
     file_facts(nf, t, &size, &attrs);
-    switch (a[4]) {
+    switch (cls) {
     case 4: /* FileBasicInformation: times, FileAttributes */
         len = 0x28;
         memset(o, 0, len);
@@ -1806,15 +1913,14 @@ static uint64_t NtQueryInformationFile(NcKernel *k, NcFrame *f, const uint32_t *
         nc_wr32(o, 0);
         break;
     default:
-        nc_log("hakuX-native-io", "query information class %u on %s not implemented", a[4], nf->path);
-        io_status(k, a[1], 0xC0000003u, 0); /* STATUS_INVALID_INFO_CLASS */
-        return 0xC0000003u;
+        nc_log("hakuX-native-io", "query information class %u on %s not implemented", cls, nf->path);
+        return 0xC0000003u; /* STATUS_INVALID_INFO_CLASS */
     }
-    if (a[3] < len) {
+    if (buf_len < len) {
         return STATUS_BUFFER_TOO_SMALL;
     }
-    memcpy(nc_vm_host(k->vm, a[2]), o, len);
-    io_status(k, a[1], NC_STATUS_SUCCESS, len);
+    memcpy(nc_vm_host(k->vm, buf), o, len);
+    *out_len = len;
     return NC_STATUS_SUCCESS;
 }
 
@@ -1918,6 +2024,13 @@ static uint64_t NtSetInformationFile(NcKernel *k, NcFrame *f, const uint32_t *a)
         if (st != NC_STATUS_SUCCESS) {
             nc_log("hakuX-native-io", "rename %s to %s (replace %u) -> %x", nf->path, name, in[0], st);
         }
+        break;
+    }
+    case 30: { /* FileCompletionInformation: Port (a handle), Key; once per file */
+        enum NcObType type;
+        const uint32_t fo = nc_ob_lookup(k, a[0], &type);
+        st = a[3] < 8 ? 0xC0000004u /* STATUS_INFO_LENGTH_MISMATCH */
+                      : nc_iomgr_file_port(k, fo, nc_rd32(in), nc_rd32(in + 4));
         break;
     }
     default:
@@ -2386,6 +2499,7 @@ static uint32_t disk_ioctl(const NcFile *nf, uint32_t code, uint8_t *out, uint32
  * Orta, XDK 4928): CDFValid, PartitionArea 1, Authentication. Other commands
  * read zeros. */
 #define IOCTL_SCSI_PASS_THROUGH_DIRECT 0x4D014u
+#define IOCTL_CDROM_GET_DRIVE_GEOMETRY 0x2404Cu
 
 /* READ DVD STRUCTURE, format 0 at address FF02FDFF (layer FE), asks for the
  * disc's security sector, returned after a 4-byte header. A real drive reads
@@ -2494,20 +2608,6 @@ static uint64_t NtControlFile(NcKernel *k, NcFrame *f, const uint32_t *a)
     io_status(k, a[4], status, info);
     complete(k, a);
     return status;
-}
-
-/* IoSynchronousDeviceIoControlRequest(IoControlCode, DeviceObject, InputBuffer, InputBufferLength,
- *   OutputBuffer, OutputBufferLength, ReturnedOutputBufferLength, InternalDeviceIoControl) */
-static uint64_t IoSynchronousDeviceIoControlRequest(NcKernel *k, NcFrame *f, const uint32_t *a)
-{
-    nc_log("hakuX-native-io", "device control %08x on device %08x (out %u)", a[0], a[1], a[5]);
-    if (a[4] && a[5]) {
-        memset(nc_vm_host(k->vm, a[4]), 0, a[5]);
-    }
-    if (a[6]) {
-        nc_vm_wr32(k->vm, a[6], 0);
-    }
-    return NC_STATUS_SUCCESS;
 }
 
 /* -------------------------------------------------------- symbolic links */
@@ -2707,6 +2807,368 @@ static uint64_t ObReferenceObjectByName(NcKernel *k, NcFrame *f, const uint32_t 
     return NC_STATUS_SUCCESS;
 }
 
+/* An IRP to one of the kernel's own devices (the disc, the hard disk's
+ * partitions: a device object with no driver), done at once as the same
+ * request through a file is (NtReadFile, NtWriteFile, NtDeviceIoControlFile).
+ * sp: its stack location (Xbox layouts: Read/Write { Length +4, ByteOffset
+ * +0xC }, DeviceIoControl { OutputBufferLength +4, InputBuffer +8,
+ * InputBufferLength +0xC, IoControlCode +0x10 }; the data at UserBuffer).
+ * Returns the status, *info the bytes moved. */
+uint32_t nc_io_device_irp(NcKernel *k, uint32_t dev, uint32_t irp, uint32_t sp, uint32_t *info)
+{
+    *info = 0;
+    const char *path = NULL, *rel = "";
+    for (int i = 0; i < 32 && !path; i++) {
+        if (g_devices[i].object == dev) {
+            path = g_devices[i].name;
+        }
+    }
+    const int part = path ? device_of(path, &rel) : -2;
+    if (part == -2 || *rel) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+    const uint8_t major = *(const uint8_t *)nc_vm_host(k->vm, sp);
+    const uint32_t buf = nc_vm_rd32(k->vm, irp + 0x30);
+    switch (major) {
+    case 2:   /* IRP_MJ_READ */
+    case 3: { /* IRP_MJ_WRITE */
+        const bool write = major == 3;
+        const uint32_t len = nc_vm_rd32(k->vm, sp + 4);
+        const uint64_t off = (uint64_t)nc_vm_rd32(k->vm, sp + 0xC) | (uint64_t)nc_vm_rd32(k->vm, sp + 0x10) << 32;
+        if (len && !buf) {
+            return NC_STATUS_INVALID_PARAMETER;
+        }
+        if (part == -1) {
+            if (write) {
+                return STATUS_MEDIA_WRITE_PROTECTED;
+            }
+            if (!k->disc || k->disc->fd < 0) {
+                return STATUS_NO_MEDIA_IN_DEVICE;
+            }
+            const NcDiscFile raw = {.sector = (uint32_t)(off / DISC_SECTOR), .size = UINT32_MAX};
+            nc_vm_will_write(buf, len);
+            if (len && !nc_disc_read(k->disc, &raw, off % DISC_SECTOR, nc_vm_host(k->vm, buf), len)) {
+                return 0xC000009Cu; /* STATUS_DEVICE_DATA_ERROR */
+            }
+        } else if (part == 0 || part >= 3) {
+            /* the config sectors, a cache partition's head (raw_io) */
+            if (write) {
+                nc_vm_will_read(buf, len);
+            } else {
+                nc_vm_will_write(buf, len);
+            }
+            raw_io(part, off, nc_vm_host(k->vm, buf), len, write);
+        } else {
+            return STATUS_INVALID_DEVICE_REQUEST; /* the data and system drives are host folders */
+        }
+        *info = len;
+        return NC_STATUS_SUCCESS;
+    }
+    case 0x0A:   /* IRP_MJ_DEVICE_CONTROL */
+    case 0x0B: { /* IRP_MJ_INTERNAL_DEVICE_CONTROL */
+        const uint32_t code = nc_vm_rd32(k->vm, sp + 0x10), out_len = nc_vm_rd32(k->vm, sp + 4);
+        uint32_t status = NC_STATUS_SUCCESS;
+        if (part >= 0 && (code >> 16) == 7) { /* FILE_DEVICE_DISK */
+            static NcFile volume;
+            volume.kind = F_VOLUME;
+            volume.partition = part;
+            *info = disk_ioctl(&volume, code, buf ? nc_vm_host(k->vm, buf) : NULL, buf ? out_len : 0, &status);
+        } else if (part == -1 && code == IOCTL_CDROM_GET_DRIVE_GEOMETRY) {
+            /* DISK_GEOMETRY: Cylinders, MediaType (RemovableMedia), TracksPerCylinder,
+             * SectorsPerTrack, BytesPerSector; the game partition's sectors */
+            if (!buf || out_len < 24) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            uint8_t *o = nc_vm_host(k->vm, buf);
+            uint64_t sectors = 0, bytes = 0;
+            struct stat st;
+            if (k->disc && k->disc->chd) {
+                bytes = nc_chd_size(k->disc->chd);
+            } else if (k->disc && k->disc->fd >= 0 && fstat(k->disc->fd, &st) == 0) {
+                bytes = (uint64_t)st.st_size;
+            }
+            if (k->disc && bytes > k->disc->part_off) {
+                sectors = (bytes - k->disc->part_off) / DISC_SECTOR;
+            }
+            put64(o, sectors);
+            nc_wr32(o + 8, 11); /* RemovableMedia */
+            nc_wr32(o + 12, 1);
+            nc_wr32(o + 16, 1);
+            nc_wr32(o + 20, DISC_SECTOR);
+            *info = 24;
+        } else if (code == IOCTL_SCSI_PASS_THROUGH_DIRECT) {
+            scsi_pass_through(k, nc_vm_rd32(k->vm, sp + 8), nc_vm_rd32(k->vm, sp + 0xC));
+        } else if (code != FSCTL_LOCK_VOLUME && code != FSCTL_UNLOCK_VOLUME && code != FSCTL_DISMOUNT_VOLUME) {
+            static uint32_t told[16];
+            unsigned i = 0;
+            while (i < 16 && told[i] && told[i] != code) {
+                i++;
+            }
+            if (i < 16 && !told[i]) {
+                told[i] = code;
+                nc_log("hakuX-native-io", "irp control %08x on %s: not known here (invalid device request)", code,
+                       path);
+            }
+            status = STATUS_INVALID_DEVICE_REQUEST;
+        }
+        return status;
+    }
+    case 0x06: /* IRP_MJ_FLUSH_BUFFERS: nothing held back */
+        return NC_STATUS_SUCCESS;
+    default:
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+}
+
+/* ------------------------------------------------------------ directories */
+
+/* Directory objects: the namespace's directories as the kernel has them
+ * (\, \??, \Device, \Device\Harddisk0, \Win32NamedObjects) and those a title
+ * creates. The body is OBJECT_DIRECTORY's hash buckets (unused here), then
+ * the directory's full name. Their entries come from the kernel's tables:
+ * the symbolic links, the devices. */
+#define DIR_BUCKETS 0x2Cu
+#define DIR_NAME_MAX 0x80u
+#define OB_WIN32_NAMED 0xFFFFFFFCu
+#define STATUS_NO_MORE_ENTRIES 0x8000001Au
+
+static const char *const k_dirs[] = {"\\", "\\??", "\\Device", "\\Device\\Harddisk0", "\\Win32NamedObjects"};
+
+static const char *dir_name(NcKernel *k, uint32_t dir)
+{
+    return (const char *)nc_vm_host(k->vm, dir + DIR_BUCKETS);
+}
+
+/* The directory object with a handle open and full name path, or 0. */
+static uint32_t dir_find(NcKernel *k, const char *path)
+{
+    for (unsigned i = 1; i < NC_MAX_HANDLES; i++) {
+        const NcHandle *h = &k->handle_table[i];
+        if (h->object && h->type == NC_OB_DIRECTORY && !strcasecmp(dir_name(k, h->object), path)) {
+            return h->object;
+        }
+    }
+    return 0;
+}
+
+static bool dir_builtin(const char *path)
+{
+    for (size_t i = 0; i < sizeof(k_dirs) / sizeof(k_dirs[0]); i++) {
+        if (!strcasecmp(k_dirs[i], path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* OBJECT_ATTRIBUTES' full name: RootDirectory a directory handle or \?? /
+ * \Win32NamedObjects, else the name itself (absolute). False: invalid. */
+static bool ob_full_name(NcKernel *k, uint32_t attrs, char *out, size_t cap)
+{
+    char name[256];
+    ansi(k, nc_vm_rd32(k->vm, attrs + 4), name, sizeof(name));
+    const uint32_t root = nc_vm_rd32(k->vm, attrs);
+    enum NcObType type;
+    const uint32_t dir = root && root != OB_DOS_DEVICES && root != OB_WIN32_NAMED ? nc_ob_lookup(k, root, &type) : 0;
+    if (!root) {
+        snprintf(out, cap, "%s", name);
+        return name[0] == '\\';
+    }
+    if (name[0] == '\\') {
+        return false;
+    }
+    const char *base = root == OB_DOS_DEVICES ? "\\??" : root == OB_WIN32_NAMED ? "\\Win32NamedObjects"
+                     : dir && type == NC_OB_DIRECTORY ? dir_name(k, dir) : NULL;
+    if (!base) {
+        return false;
+    }
+    snprintf(out, cap, "%s%s%s", base, strcmp(base, "\\") ? "\\" : "", name);
+    return true;
+}
+
+static uint32_t dir_open(NcKernel *k, const char *path, uint32_t handle_out, bool create)
+{
+    uint32_t dir = dir_find(k, path);
+    if (!dir && !create && !dir_builtin(path)) {
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+    if (dir && create) {
+        return STATUS_OBJECT_NAME_COLLISION;
+    }
+    if (!dir) {
+        if (strlen(path) >= DIR_NAME_MAX) {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+        dir = nc_ob_create(k, NC_OB_DIRECTORY, DIR_BUCKETS + DIR_NAME_MAX);
+        if (!dir) {
+            return NC_STATUS_INSUFFICIENT_RESOURCES;
+        }
+        snprintf((char *)nc_vm_host(k->vm, dir + DIR_BUCKETS), DIR_NAME_MAX, "%s", path);
+    }
+    const uint32_t h = nc_ob_handle(k, dir, NC_OB_DIRECTORY);
+    if (!h) {
+        return NC_STATUS_INSUFFICIENT_RESOURCES;
+    }
+    nc_vm_wr32(k->vm, handle_out, h);
+    return NC_STATUS_SUCCESS;
+}
+
+/* NtCreateDirectoryObject(DirectoryHandle, ObjectAttributes) */
+static uint64_t NtCreateDirectoryObject(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    char path[256];
+    if (!ob_full_name(k, a[1], path, sizeof(path))) {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    if (dir_builtin(path)) {
+        return STATUS_OBJECT_NAME_COLLISION;
+    }
+    return dir_open(k, path, a[0], true);
+}
+
+/* NtOpenDirectoryObject(DirectoryHandle, ObjectAttributes) */
+static uint64_t NtOpenDirectoryObject(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    char path[256];
+    if (!ob_full_name(k, a[1], path, sizeof(path))) {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    return dir_open(k, path, a[0], false);
+}
+
+/* Entry i of directory path: its name and its type's pool tag; false past the last. */
+static bool dir_entry(NcKernel *k, const char *path, unsigned i, char *name, size_t cap, uint32_t *tag)
+{
+    static const uint32_t DIRE = 0x65726944u, SYMB = 0x626D7953u, DEVI = 0x69766544u; /* "Dire" "Symb" "Devi" */
+    unsigned n = 0;
+    const size_t plen = strlen(path);
+    if (!strcmp(path, "\\")) {
+        static const char *const top[] = {"??", "Device", "Win32NamedObjects"};
+        if (i < 3) {
+            snprintf(name, cap, "%s", top[i]);
+            *tag = DIRE;
+            return true;
+        }
+        n = 3;
+    } else if (!strcasecmp(path, "\\??")) {
+        for (int l = 0; l < MAX_LINKS; l++) {
+            if (g_links[l].name[0] && prefix_ci(g_links[l].name, "\\??\\") && n++ == i) {
+                snprintf(name, cap, "%s", g_links[l].name + 4);
+                *tag = SYMB;
+                return true;
+            }
+        }
+    } else if (!strcasecmp(path, "\\Device")) {
+        static const char *const own[] = {"CdRom0", "Harddisk0"};
+        if (i < 2) {
+            snprintf(name, cap, "%s", own[i]);
+            *tag = i ? DIRE : DEVI;
+            return true;
+        }
+        n = 2;
+        for (int d = 0; d < 32; d++) {
+            const char *dn = g_devices[d].name;
+            if (g_devices[d].object && prefix_ci(dn, "\\Device\\") && !strchr(dn + 8, '\\') &&
+                strcasecmp(dn + 8, "CdRom0") && n++ == i) {
+                snprintf(name, cap, "%s", dn + 8);
+                *tag = DEVI;
+                return true;
+            }
+        }
+    } else if (!strcasecmp(path, "\\Device\\Harddisk0")) {
+        if (i < 6) {
+            snprintf(name, cap, "Partition%u", i);
+            *tag = DEVI;
+            return true;
+        }
+        n = 6;
+    }
+    /* the directories created in it */
+    for (unsigned h = 1; h < NC_MAX_HANDLES; h++) {
+        const NcHandle *e = &k->handle_table[h];
+        if (!e->object || e->type != NC_OB_DIRECTORY) {
+            continue;
+        }
+        const char *dn = dir_name(k, e->object);
+        const char *rest = dn + plen + (plen > 1);
+        bool seen = false;
+        for (unsigned g = 1; g < h && !seen; g++) {
+            seen = k->handle_table[g].object == e->object;
+        }
+        if (!seen && strlen(dn) > plen + 1 && !strncasecmp(dn, path, plen) && (plen == 1 || dn[plen] == '\\') &&
+            !strchr(rest, '\\') && !dir_builtin(dn) && n++ == i) {
+            snprintf(name, cap, "%s", rest);
+            *tag = DIRE;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* NtQueryDirectoryObject(DirectoryHandle, Buffer, Length, RestartScan, Context, ReturnLength):
+ * one entry a call, OBJECT_DIRECTORY_INFORMATION { Name (OBJECT_STRING), Type
+ * (its type's pool tag) } with the name after it; Context the next entry's index */
+static uint64_t NtQueryDirectoryObject(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    enum NcObType type;
+    const uint32_t dir = nc_ob_lookup(k, a[0], &type);
+    if (!dir) {
+        return NC_STATUS_INVALID_HANDLE;
+    }
+    if (type != NC_OB_DIRECTORY) {
+        return NC_STATUS_OBJECT_TYPE_MISMATCH;
+    }
+    const unsigned i = (a[3] & 0xFF) ? 0 : nc_vm_rd32(k->vm, a[4]);
+    char name[128];
+    uint32_t tag;
+    if (!dir_entry(k, dir_name(k, dir), i, name, sizeof(name), &tag)) {
+        return STATUS_NO_MORE_ENTRIES;
+    }
+    const uint32_t len = (uint32_t)strlen(name), need = 12 + len + 1;
+    if (a[5]) {
+        nc_vm_wr32(k->vm, a[5], need);
+    }
+    if (a[2] < need) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    uint8_t *o = nc_vm_host(k->vm, a[1]);
+    *(uint16_t *)o = (uint16_t)len;
+    *(uint16_t *)(o + 2) = (uint16_t)(len + 1);
+    nc_wr32(o + 4, a[1] + 12);
+    nc_wr32(o + 8, tag);
+    memcpy(o + 12, name, len + 1);
+    nc_vm_wr32(k->vm, a[4], i + 1);
+    return NC_STATUS_SUCCESS;
+}
+
+/* ObOpenObjectByName(ObjectAttributes, ObjectType, ParseContext, Handle): a
+ * directory, a device or a symbolic link (files open through IoCreateFile) */
+static uint64_t ObOpenObjectByName(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    char path[256];
+    if (!ob_full_name(k, a[0], path, sizeof(path))) {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+    if ((!a[1] || a[1] == k->type_va[NC_OB_DIRECTORY]) && (dir_builtin(path) || dir_find(k, path))) {
+        return dir_open(k, path, a[3], false);
+    }
+    if (a[1] == k->type_va[NC_OB_SYMLINK] || (!a[1] && link_find(path) >= 0)) {
+        const uint32_t args[2] = {a[3], a[0]};
+        return NtOpenSymbolicLinkObject(k, f, args);
+    }
+    if ((!a[1] || a[1] == k->type_va[NC_OB_DEVICE]) && !nc_vm_rd32(k->vm, a[0])) { /* devices by full name */
+        const uint32_t name = nc_vm_rd32(k->vm, a[0] + 4), dev_out = a[3];
+        uint32_t dev = 0;
+        const uint32_t args[5] = {name, 0, 0, 0, dev_out};
+        if (ObReferenceObjectByName(k, f, args) == NC_STATUS_SUCCESS && (dev = nc_vm_rd32(k->vm, dev_out)) != 0) {
+            const uint32_t h = nc_ob_handle(k, dev, NC_OB_DEVICE);
+            nc_vm_wr32(k->vm, dev_out, h);
+            return h ? NC_STATUS_SUCCESS : NC_STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+    return STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
 void nc_io_register(NcKernel *k)
 {
     g_trace_io = getenv("NC_TRACE_IO") != NULL;
@@ -2714,6 +3176,15 @@ void nc_io_register(NcKernel *k)
     link_set("\\??\\CdRom0:", "\\Device\\CdRom0");     /* the kernel's own, as on the Xbox (the dashboard's) */
     nc_kernel_impl(k, "ExReadWriteRefurbInfo", ExReadWriteRefurbInfo);
     nc_kernel_impl(k, "IoDismountVolumeByName", IoDismountVolumeByName);
+    nc_kernel_impl(k, "IoDismountVolume", IoDismountVolume);
+    nc_kernel_impl(k, "FscInvalidateIdleBlocks", FscInvalidateIdleBlocks);
+    nc_kernel_impl(k, "IoCreateFile", IoCreateFile);
+    nc_kernel_impl(k, "IoQueryFileInformation", IoQueryFileInformation);
+    nc_kernel_impl(k, "NtWriteFileGather", NtWriteFileGather);
+    nc_kernel_impl(k, "NtCreateDirectoryObject", NtCreateDirectoryObject);
+    nc_kernel_impl(k, "NtOpenDirectoryObject", NtOpenDirectoryObject);
+    nc_kernel_impl(k, "NtQueryDirectoryObject", NtQueryDirectoryObject);
+    nc_kernel_impl(k, "ObOpenObjectByName", ObOpenObjectByName);
 
     nc_kernel_impl(k, "NtCreateFile", NtCreateFile);
     nc_kernel_impl(k, "NtOpenFile", NtOpenFile);
@@ -2730,7 +3201,6 @@ void nc_io_register(NcKernel *k)
     nc_kernel_impl(k, "NtFlushBuffersFile", NtFlushBuffersFile);
     nc_kernel_impl(k, "NtFsControlFile", NtControlFile);
     nc_kernel_impl(k, "NtDeviceIoControlFile", NtControlFile);
-    nc_kernel_impl(k, "IoSynchronousDeviceIoControlRequest", IoSynchronousDeviceIoControlRequest);
     nc_kernel_impl(k, "IoCreateSymbolicLink", IoCreateSymbolicLink);
     nc_kernel_impl(k, "IoDeleteSymbolicLink", IoDeleteSymbolicLink);
     nc_kernel_impl(k, "NtOpenSymbolicLinkObject", NtOpenSymbolicLinkObject);

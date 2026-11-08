@@ -1,10 +1,8 @@
 #!/bin/sh
 # Copyright (C) 2026-present PortareOS
-# PortareOS's hakux-lr package's input: the libretro core with its core
-# info, stripped, with the licences and the revisions it was built from, as
-# build/package/hakux-<version>-<architecture>.tar.gz.
-# Run after linux-build.sh, in the same image, on a clean checkout: the
-# archive is the commit's.
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Package a committed libretro build with its metadata and licences.
+# Run after linux-build.sh in the same image from a clean checkout.
 set -eu
 
 version=${1:?usage: linux-package.sh <version>}
@@ -33,6 +31,15 @@ mkdir -p "$out/$name/lib/libretro" "$out/$name/share/licenses/hakux"
 sed "s/^display_version = .*/display_version = \"$version\"/" native/libretro/hakux_libretro.info \
     > "$out/$name/lib/libretro/hakux_libretro.info"
 cp LICENSE COPYING licenses/* "$out/$name/share/licenses/hakux/"
+# Record the glibc requirement from the binary's ELF symbol versions.
+# Host builds may require newer libraries than the release sysroot.
+glibc=$("${READELF:-readelf}" --version-info "$out/$name/lib/libretro/hakux_libretro.so" |
+    grep -o 'GLIBC_2\.[0-9.]*' | sort -u -t. -k2,2n -k3,3n | tail -n1)
+glibc=${glibc#GLIBC_}
+if [ -z "$glibc" ]; then
+    echo "linux-package.sh: no glibc version in the core's symbol versions" >&2
+    exit 1
+fi
 dsp_jit=off
 if grep -q '^HAKUX_DSP_JIT:BOOL=ON$' "$build/CMakeCache.txt"; then
     dsp_jit=on
@@ -47,7 +54,7 @@ fi
     if [ "$dsp_jit" = on ]; then
         cat "$build/dsp-jit/licenses/BUILD-INFO"
     fi
-    echo "runtime libz, libstdc++, libm, libgcc_s, glibc 2.38 ($arch); libvulkan.so.1 loaded at run time"
+    echo "runtime libz, libstdc++, libm, libgcc_s, glibc $glibc+ ($arch); libvulkan.so.1 loaded at run time"
     if [ "$arch" = x86_64 ]; then
         echo "CPU KVM; Linux 5.16+, /dev/kvm, TSC scaling and UMIP required"
     fi

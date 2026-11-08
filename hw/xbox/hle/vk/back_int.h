@@ -114,10 +114,22 @@ void hle_surf_rec_end(void);
 void hle_img_barrier(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect,
                      VkImageLayout from, VkImageLayout to);
 void hle_surf_transition(VkCommandBuffer cb, HleVkSurf *s, VkImageLayout to);
-/* gamma.c: the swap's copy through the gamma ramp of src's top left sw x sh
- * pixels; false = not done (blit) */
-bool hle_gamma_pass(VkCommandBuffer cb, unsigned slot, const uint8_t ramp[3][256],
-                    HleVkSurf *src, uint32_t sw, uint32_t sh, VkImage dst, uint32_t dw, uint32_t dh);
+/* The video overlay as the display pass composes it (HleCmdOverlay). */
+typedef struct HleDispOverlay {
+    VkImageView view;                   /* B8G8R8A8, SHADER_READ_ONLY */
+    float rect[4];                      /* output: left, top, right, bottom (frame pixels) */
+    float in[4];                        /* input x, y (texels), texels per frame pixel x, y */
+    float pix[2];                       /* display pixels per frame pixel */
+    bool key_on;
+    uint32_t key;
+    uint32_t key_fmt;                   /* the frame's pixels: 0 24-bit RGB, 1 R5G6B5, 2 X1R5G5B5 */
+} HleDispOverlay;
+/* gamma.c: the swap's copy of src's top left sw x sh pixels into dst with
+ * the gamma ramp (NULL: none) and the video overlay (NULL: none); false =
+ * not done (blit) */
+bool hle_display_pass(VkCommandBuffer cb, unsigned slot, const uint8_t ramp[3][256],
+                      HleVkSurf *src, uint32_t sw, uint32_t sh, const HleDispOverlay *ov,
+                      VkImage dst, uint32_t dw, uint32_t dh);
 /* zread.c: depth-stencil surface src into colour surface dst as its 32-bit
  * words (HleCmdZRead), outside a pass; slot: the frame's command buffer.
  * NULL = done, else why not. */

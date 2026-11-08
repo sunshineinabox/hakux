@@ -78,20 +78,26 @@ static void list_init(NcVm *vm, uint32_t head)
     nc_vm_wr32(vm, head + 4, head);
 }
 
-/* Stack slots in the kernel stack region, each with an unmapped guard below.
- * A slot given back (a thread's end, MmDeleteKernelStack) is taken again by
- * a stack it holds, what it has over kept as a slot of its own; the region
- * ends at the GPU's view of RAM, where an allocation fails instead of
- * mapping over it (titles start a thread per movie and load). */
+/* Stack slots have an unmapped guard below and a zeroed page above.
+ * Some titles read past StackBase expecting the console's adjacent
+ * system allocation (Dave Mirra 2 and Tomb Raider: Legend). Reuse free
+ * slots, split spare space, and keep the region below the GPU window. */
+#define STACK_OVER NC_PAGE
+
+static uint32_t stack_span(uint32_t size)
+{
+    return STACK_GUARD + nc_align_up(size + STACK_OVER, STACK_GUARD);
+}
+
 bool nc_ps_stack_alloc(NcKernel *k, uint32_t size, uint32_t *base)
 {
     if (!k->next_stack_va) {
         k->next_stack_va = STACK_REGION;
     }
-    const uint32_t span = STACK_GUARD + nc_align_up(size, STACK_GUARD);
+    const uint32_t span = stack_span(size);
     for (unsigned i = 0; i < k->nstack_free; i++) {
         const uint32_t va = k->stack_free[i].va, have = k->stack_free[i].span;
-        if (have < span || !nc_vm_alloc_at(k->vm, va + STACK_GUARD, size, NULL)) {
+        if (have < span || !nc_vm_alloc_at(k->vm, va + STACK_GUARD, size + STACK_OVER, NULL)) {
             continue;
         }
         k->stack_free[i] = k->stack_free[--k->nstack_free];
@@ -100,6 +106,7 @@ bool nc_ps_stack_alloc(NcKernel *k, uint32_t size, uint32_t *base)
             k->stack_free[k->nstack_free++].span = have - span;
         }
         *base = va + STACK_GUARD;
+        memset(nc_vm_host(k->vm, *base + size), 0, STACK_OVER);
         return true;
     }
     const uint32_t slot = k->next_stack_va;
@@ -107,17 +114,18 @@ bool nc_ps_stack_alloc(NcKernel *k, uint32_t size, uint32_t *base)
         nc_log("hakuX-native", "ps: the stack region is full (%u KiB more asked)", size >> 10);
         return false;
     }
-    if (!nc_vm_alloc_at(k->vm, slot + STACK_GUARD, size, NULL)) {
+    if (!nc_vm_alloc_at(k->vm, slot + STACK_GUARD, size + STACK_OVER, NULL)) {
         return false;
     }
     k->next_stack_va = slot + span;
     *base = slot + STACK_GUARD;
+    memset(nc_vm_host(k->vm, *base + size), 0, STACK_OVER);
     return true;
 }
 
 void nc_ps_stack_free(NcKernel *k, uint32_t base, uint32_t size)
 {
-    const uint32_t slot = base - STACK_GUARD, span = STACK_GUARD + nc_align_up(size, STACK_GUARD);
+    const uint32_t slot = base - STACK_GUARD, span = stack_span(size);
     if (base < STACK_REGION + STACK_GUARD || base % STACK_GUARD || !size || span > k->next_stack_va - slot ||
         k->nstack_free == sizeof(k->stack_free) / sizeof(k->stack_free[0])) {
         return;     /* not a slot of the region, or no room to keep it: its addresses stay used */
@@ -200,7 +208,7 @@ static NcThread *thread_create(NcKernel *k, uint32_t stack_size, uint32_t tls_si
     }
     kt[KT_PRIORITY] = DEFAULT_PRIORITY;
     kt[KT_BASE_PRIORITY] = DEFAULT_PRIORITY;
-    nc_vm_wr32(vm, et + KT_QUANTUM, 36);
+    nc_vm_wr32(vm, et + KT_QUANTUM, 60); /* the process's quantum, in its units (nc_ke_unwaited) */
     if (!k->kprocess && (k->kprocess = nc_pool_alloc(k, KPROCESS_SIZE)) != 0) {
         memset(nc_vm_host(vm, k->kprocess), 0, KPROCESS_SIZE);
         list_init(vm, k->kprocess + KP_READY_LIST);
@@ -295,7 +303,7 @@ NcThread *nc_ps_kernel_thread(NcKernel *k, uint32_t stack_size, int priority)
 {
     NcThread *t = thread_create(k, stack_size, 0, 0);
     if (t) {
-        t->priority = priority;
+        nc_ke_priority_init(k, t, priority);
         nc_log("hakuX-native", "ps: kernel thread %u, priority %d, stack %08x-%08x", t->id, priority,
                t->stack_limit, t->stack_base);
     }
@@ -320,6 +328,7 @@ void nc_ps_slice_end(NcKernel *k, uint64_t now)
     if (!cur || cur != k->slice_thread || cur->state != NC_T_RUNNING) {
         return; /* an ISR or a DPC runs: the slice ends once its thread is back */
     }
+    nc_ke_quantum_end(k, cur); /* a wait's boost goes down one */
     for (unsigned i = 0; i < k->threads_hi; i++) {
         const NcThread *t = &k->threads[i];
         if (t != cur && t->state == NC_T_READY && !t->suspend && t->priority >= cur->priority) {
@@ -461,7 +470,7 @@ void nc_ps_schedule(NcKernel *k, NcFrame *f)
         /* Off its stack for good: the pages go back (titles start threads per
          * movie and load), the slot can hold a new thread. Its ETHREAD stays,
          * signaled, for whoever still holds a handle. */
-        const uint32_t end = cur->stack_base + (cur->tib_base ? 0 : NC_PAGE);  /* nc_ps_old_stacks's page */
+        const uint32_t end = cur->stack_base + STACK_OVER;  /* extra page, including legacy padding */
         for (uint32_t p = cur->stack_limit; p < end; p += NC_PAGE) {
             const uint32_t pa = nc_vm_phys(k->vm, p);
             if (pa != UINT32_MAX) {
@@ -499,6 +508,69 @@ void nc_ps_terminate_current(NcKernel *k, uint32_t status)
     nc_vm_wr32(k->vm, t->ethread + ET_EXIT_STATUS, status);
     nc_vm_wr32(k->vm, t->ethread + KT_SIGNAL_STATE, 1); /* the thread object is signaled */
     k->resched = true;
+}
+
+/* ------------------------------------------------ thread notify routines */
+
+/* PsSetCreateThreadNotifyRoutine's routines, in the KPCR's page (a savestate
+ * keeps them): routine(Thread, ThreadId, Create) as a thread is created (in
+ * its creator) and as it ends (in itself). */
+#define NOTIFY_MAX 8
+
+static uint32_t notify_va(const NcKernel *k, unsigned i)
+{
+    return k->kpcr_va + NC_KPCR_THREAD_NOTIFY + 4 * i;
+}
+
+/* The notify routines from ctx[0] on, then: a creation returns ctx[4] (its
+ * status), an exit ends the thread with ctx[4]. ctx: next routine, ETHREAD,
+ * thread ID, Create, status. */
+static uint64_t notify_next(NcKernel *k, NcFrame *f, uint32_t eax, const uint32_t *ctx)
+{
+    for (unsigned i = ctx[0]; i < NOTIFY_MAX; i++) {
+        const uint32_t routine = nc_vm_rd32(k->vm, notify_va(k, i));
+        if (routine) {
+            const uint32_t args[3] = {ctx[1], ctx[2], ctx[3]};
+            const uint32_t next[NC_KCONT_WORDS] = {i + 1, ctx[1], ctx[2], ctx[3], ctx[4]};
+            nc_kernel_callout_cont(k, f, routine, args, 3, 0xFF, NC_KCONT_THREAD_NOTIFY, next);
+            return 0;
+        }
+    }
+    if (!ctx[3]) {
+        nc_ps_terminate_current(k, ctx[4]);
+    }
+    return ctx[4];
+}
+
+/* The running thread ends with status, after the notify routines. */
+static void thread_exit(NcKernel *k, NcFrame *f, uint32_t status)
+{
+    const NcThread *t = k->current;
+    const uint32_t ctx[NC_KCONT_WORDS] = {0, t->ethread, t->id, 0, status};
+    notify_next(k, f, 0, ctx);
+}
+
+void nc_ps_thread_returned(NcKernel *k, NcFrame *f)
+{
+    if (!k->current) {
+        return;
+    }
+    k->call_pop = 0;
+    k->frame = f;
+    k->redirected = false;
+    thread_exit(k, f, NC_STATUS_SUCCESS);
+}
+
+/* PsSetCreateThreadNotifyRoutine(NotifyRoutine): up to 8 */
+static uint64_t PsSetCreateThreadNotifyRoutine(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    for (unsigned i = 0; i < NOTIFY_MAX; i++) {
+        if (!nc_vm_rd32(k->vm, notify_va(k, i))) {
+            nc_vm_wr32(k->vm, notify_va(k, i), a[0]);
+            return NC_STATUS_SUCCESS;
+        }
+    }
+    return NC_STATUS_INSUFFICIENT_RESOURCES;
 }
 
 /* PsCreateSystemThreadEx(ThreadHandle, ThreadExtensionSize, KernelStackSize, TlsDataSize,
@@ -540,6 +612,33 @@ static uint64_t PsCreateSystemThreadEx(NcKernel *k, NcFrame *f, const uint32_t *
     nc_log("hakuX-native", "ps: thread %u created: start %08x (%s), stack %08x-%08x, tls %u%s", t->id,
            a[5], a[9] ? "via system routine" : "direct", t->stack_limit, t->stack_base, a[3],
            t->suspend ? ", suspended" : "");
+    const uint32_t ctx[NC_KCONT_WORDS] = {0, t->ethread, t->id, 1, NC_STATUS_SUCCESS};
+    return notify_next(k, f, 0, ctx);
+}
+
+/* PsCreateSystemThread(ThreadHandle, ThreadId, StartRoutine, StartContext, DebuggerThread):
+ * PsCreateSystemThreadEx with the kernel's least stack and no TLS. */
+static uint64_t PsCreateSystemThread(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    const uint32_t ex[10] = {a[0], 0, KERNEL_STACK_SIZE, 0, a[1], a[2], a[3], 0, a[4], 0};
+    return PsCreateSystemThreadEx(k, f, ex);
+}
+
+/* PsQueryStatistics(ProcessStatistics) -> { Length (12), ThreadCount, HandleCount } */
+static uint64_t PsQueryStatistics(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    if (nc_vm_rd32(k->vm, a[0]) != 12) {
+        return NC_STATUS_INVALID_PARAMETER;
+    }
+    uint32_t threads = 0, handles = 0;
+    for (unsigned i = 0; i < k->threads_hi; i++) {
+        threads += k->threads[i].state != NC_T_FREE && k->threads[i].state != NC_T_TERMINATED;
+    }
+    for (unsigned i = 1; i < NC_MAX_HANDLES; i++) {
+        handles += k->handle_table[i].object != 0;
+    }
+    nc_vm_wr32(k->vm, a[0] + 4, threads);
+    nc_vm_wr32(k->vm, a[0] + 8, handles);
     return NC_STATUS_SUCCESS;
 }
 
@@ -631,11 +730,24 @@ static uint64_t KeResumeThread(NcKernel *k, NcFrame *f, const uint32_t *a)
     return t ? resume(k, t) : 0;
 }
 
+/* KeAlertResumeThread(Thread) -> previous suspend count: alerted (kernel mode), then resumed */
+static uint64_t KeAlertResumeThread(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    NcThread *t = nc_ps_thread_of(k, a[0]);
+    if (!t) {
+        return 0;
+    }
+    nc_ke_alert(k, t, 0);
+    return resume(k, t);
+}
+
 /* PsTerminateSystemThread(ExitStatus): never returns. */
 static uint64_t PsTerminateSystemThread(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
     nc_log("hakuX-native", "ps: thread %u exits (%08x)", k->current ? k->current->id : 0, a[0]);
-    nc_ps_terminate_current(k, a[0]);
+    if (k->current) {
+        thread_exit(k, f, a[0]);
+    }
     return 0;
 }
 
@@ -647,6 +759,11 @@ void nc_ps_register(NcKernel *k)
     nc_kernel_impl(k, "NtResumeThread", NtResumeThread);
     nc_kernel_impl(k, "KeSuspendThread", KeSuspendThread);
     nc_kernel_impl(k, "KeResumeThread", KeResumeThread);
+    nc_kernel_impl(k, "KeAlertResumeThread", KeAlertResumeThread);
+    nc_kernel_impl(k, "PsCreateSystemThread", PsCreateSystemThread);
+    nc_kernel_impl(k, "PsQueryStatistics", PsQueryStatistics);
+    nc_kernel_impl(k, "PsSetCreateThreadNotifyRoutine", PsSetCreateThreadNotifyRoutine);
+    nc_kernel_cont(NC_KCONT_THREAD_NOTIFY, notify_next);
 }
 
 /* Every thread for a fault or timeout report: what it is doing or waiting

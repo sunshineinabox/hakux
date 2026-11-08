@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Test reserved header bytes and step-index clamping for mono and stereo. */
 #include <stddef.h>
 #include <stdint.h>

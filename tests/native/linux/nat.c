@@ -1,4 +1,5 @@
 /* Copyright (C) 2026-present PortareOS */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * nat-smoke (native/cmake/linux-tests.cmake): exercise NAT with console
  * Ethernet frames and a fake UPnP router on 127.0.0.1.

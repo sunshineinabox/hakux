@@ -145,6 +145,35 @@ static const ApuField k_ssl_fields[] = {
 };
 static const ApuDesc k_ssl = {"mcpx_apu_voice_data", k_ssl_fields};
 
+/* Save the filter history. Each frame sets the coefficients and output. */
+static const ApuField k_svf_fields[] = {
+    DATA(sv_filter, h),
+    DATA(sv_filter, b),
+    DATA(sv_filter, l),
+    END,
+};
+static const ApuDesc k_svf = {"mcpx-apu/vp-filter/svf", k_svf_fields};
+
+/* Save LFO, ramp and filter state. Resampler and HRTF history are transient. */
+static const ApuField k_filter_fields[] = {
+    STRUCT(MCPXAPUVoiceFilter, svf, 2, sv_filter, k_svf),
+    STRUCT(MCPXAPUVoiceFilter, peq, 2, sv_filter, k_svf),
+    DATA(MCPXAPUVoiceFilter, i3dl2),
+    DATA(MCPXAPUVoiceFilter, dls2_f),
+    DATA(MCPXAPUVoiceFilter, peq_f),
+    DATA(MCPXAPUVoiceFilter, dls2_set),
+    DATA(MCPXAPUVoiceFilter, peq_set),
+    DATA(MCPXAPUVoiceFilter, route_gain),
+    DATA(MCPXAPUVoiceFilter, gains),
+    DATA(MCPXAPUVoiceFilter, lfo_phase),
+    DATA(MCPXAPUVoiceFilter, lfo_wait),
+    DATA(MCPXAPUVoiceFilter, lfo_armed),
+    DATA(MCPXAPUVoiceFilter, pitch),
+    DATA(MCPXAPUVoiceFilter, pitched),
+    END,
+};
+static const ApuDesc k_filter = {"mcpx-apu/vp-filter", k_filter_fields};
+
 static const ApuField k_apu_fields[] = {
     PTR(MCPXAPUState, gp.dsp, DSPState, k_dsp),
     DATA(MCPXAPUState, gp.regs),
@@ -167,6 +196,8 @@ static const ApuField k_apu_fields[] = {
      * it a voice whose dry send had faded to mute beside an effect send was
      * chosen again after a load, and played the effect send's level */
     OPT_DATA(MCPXAPUState, vp.route),
+    /* Older states initialize these fields as they would at VOICE_ON. */
+    OPT_STRUCT(MCPXAPUState, vp.filters, MCPX_HW_MAX_VOICES, MCPXAPUVoiceFilter, k_filter),
     END,
 };
 static const ApuDesc k_apu = {"mcpx-apu", k_apu_fields};

@@ -7,6 +7,7 @@
  * call into guest code).
  */
 #include "native/kernel/kernel.h"
+#include "native/core/libc_compat.h"
 #include "native/core/xbe_load.h"
 #include "native/core/xdvdfs.h"
 #include "native/dev/dev.h"
@@ -51,6 +52,8 @@ static uint32_t pool_alloc(NcKernel *k, uint32_t size)
     return p + POOL_HDR;
 }
 
+static uint64_t ExFreePool(NcKernel *k, NcFrame *f, const uint32_t *a);
+
 /* ExAllocatePool(NumberOfBytes) */
 static uint64_t ExAllocatePool(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
@@ -61,6 +64,17 @@ static uint64_t ExAllocatePool(NcKernel *k, NcFrame *f, const uint32_t *a)
 static uint64_t ExAllocatePoolWithTag(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
     return pool_alloc(k, a[0]);
+}
+
+uint32_t nc_ex_alloc(NcKernel *k, uint32_t size)
+{
+    return pool_alloc(k, size);
+}
+
+void nc_ex_free(NcKernel *k, uint32_t p)
+{
+    const uint32_t a[1] = {p};
+    ExFreePool(k, NULL, a);
 }
 
 /* ExFreePool(P) */
@@ -601,7 +615,7 @@ static uint64_t ObfDereferenceObject(NcKernel *k, NcFrame *f, const uint32_t *a)
 /* The guest's string at va in buf (at most len - 1 bytes), as far as its
  * pages are mapped: a title's bad pointer ends it rather than faulting the
  * host. */
-static const char *guest_str(NcKernel *k, uint32_t va, char *buf, size_t len)
+const char *nc_kernel_guest_str(NcKernel *k, uint32_t va, char *buf, size_t len)
 {
     size_t n = 0;
     for (; n + 1 < len; n++) {
@@ -624,7 +638,7 @@ static uint64_t DbgPrint(NcKernel *k, NcFrame *f, const uint32_t *a)
     const uint32_t esp = nc_frame_gpr(f, NC_ESP);
     uint32_t argp = esp + 8; /* after the return address and Format */
     char fmtbuf[512], arg[256];
-    const char *fmt = guest_str(k, a[0], fmtbuf, sizeof(fmtbuf));
+    const char *fmt = nc_kernel_guest_str(k, a[0], fmtbuf, sizeof(fmtbuf));
     char out[512];
     size_t n = 0;
     for (const char *p = fmt; *p && n < sizeof(out) - 32; p++) {
@@ -648,7 +662,7 @@ static uint64_t DbgPrint(NcKernel *k, NcFrame *f, const uint32_t *a)
         spec[s] = 0;
         uint32_t v = nc_vm_rd32(k->vm, argp);
         switch (*p) {
-        case 's': n += (size_t)snprintf(out + n, sizeof(out) - n, spec, v ? guest_str(k, v, arg, sizeof(arg)) : "(null)"); argp += 4; break;
+        case 's': n += (size_t)snprintf(out + n, sizeof(out) - n, spec, v ? nc_kernel_guest_str(k, v, arg, sizeof(arg)) : "(null)"); argp += 4; break;
         case 'c': case 'd': case 'i': case 'u': case 'x': case 'X':
             n += (size_t)snprintf(out + n, sizeof(out) - n, spec, v); argp += 4; break;
         case 'p': n += (size_t)snprintf(out + n, sizeof(out) - n, "%08x", v); argp += 4; break;
@@ -938,7 +952,12 @@ static uint64_t HalInitiateShutdown(NcKernel *k, NcFrame *f, const uint32_t *a)
     return 0;
 }
 
-/* HalReadSMBusValue(Address, Command, ReadWord, DataValue): SMC version, tray, AV pack. */
+/* The SMC's scratch register (0x1B), which the system controller keeps for
+ * the kernel and the dashboard. */
+#define SMC_SCRATCH 0x1Bu
+static uint32_t g_smc_scratch;
+
+/* HalReadSMBusValue(Address, Command, ReadWord, DataValue): SMC version, tray, AV pack, scratch. */
 static uint64_t HalReadSMBusValue(NcKernel *k, NcFrame *f, const uint32_t *a)
 {
     static const char version[3] = {'P', '0', '1'};
@@ -949,12 +968,30 @@ static uint64_t HalReadSMBusValue(NcKernel *k, NcFrame *f, const uint32_t *a)
         case 0x01: v = (uint8_t)version[version_idx++ % 3]; break;
         case 0x03: v = k->disc && k->disc->fd >= 0 ? 0x60 : 0x40; break; /* tray closed, media present or not */
         case 0x04: v = av_pack_smc(); break; /* the AV pack, as the TV encoder reports it */
+        case SMC_SCRATCH: v = g_smc_scratch; break;
         default: break;
         }
     }
     if (a[3]) {
         nc_vm_wr32(k->vm, a[3], v);
     }
+    return NC_STATUS_SUCCESS;
+}
+
+/* HalWriteSMBusValue(Address, Command, WriteWord, DataValue): the SMC's scratch
+ * register keeps what is written to it; the rest is ignored. */
+static uint64_t HalWriteSMBusValue(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    if ((a[0] & 0xFE) == 0x20 && (uint8_t)a[1] == SMC_SCRATCH) {
+        g_smc_scratch = a[2] & 0xFF ? a[3] & 0xFFFF : a[3] & 0xFF;
+    }
+    return NC_STATUS_SUCCESS;
+}
+
+/* HalWriteSMCScratchRegister(ScratchRegister): the SMC's scratch register */
+static uint64_t HalWriteSMCScratchRegister(NcKernel *k, NcFrame *f, const uint32_t *a)
+{
+    g_smc_scratch = a[0] & 0xFF;
     return NC_STATUS_SUCCESS;
 }
 
@@ -1041,6 +1078,13 @@ void nc_kernel_title_loaded(NcKernel *k, const NcDisc *disc, const NcDiscFile *x
         *(uint16_t *)nc_vm_host(k->vm, s + 2) = (uint16_t)len;
         nc_vm_wr32(k->vm, s + 4, buf);
     }
+    /* The AV pack the kernel read from the SMC at boot: XGetAVPack returns
+     * it, and titles (Halo 2) drop 480p/720p/1080i unless it's component.
+     * Left 0, every title saw a SCART cable. */
+    s = data_va(k, "HalBootSMCVideoMode");
+    if (s) {
+        nc_vm_wr32(k->vm, s, av_pack_smc());
+    }
     /* An XBE on the hard disk: D: is the folder it was launched from, as the
      * launch path's directory part becomes D: on the Xbox (the dashboard's:
      * C:'s root). A disc's stays the disc's root, and so does a title
@@ -1090,7 +1134,8 @@ void nc_ex_register(NcKernel *k)
     nc_kernel_impl(k, "HalReturnToFirmware", HalReturnToFirmware);
     nc_kernel_impl(k, "HalInitiateShutdown", HalInitiateShutdown);
     nc_kernel_impl(k, "HalReadSMBusValue", HalReadSMBusValue);
-    nc_kernel_impl(k, "HalWriteSMBusValue", HalNothing);
+    nc_kernel_impl(k, "HalWriteSMBusValue", HalWriteSMBusValue);
+    nc_kernel_impl(k, "HalWriteSMCScratchRegister", HalWriteSMCScratchRegister);
     nc_kernel_impl(k, "HalReadSMCTrayState", HalReadSMCTrayState);
     nc_kernel_impl(k, "HalEnableSecureTrayEject", HalNothing);     /* the tray never opens */
     nc_kernel_impl(k, "FscGetCacheSize", FscGetCacheSize);
@@ -1109,4 +1154,5 @@ void nc_ex_reset(void)
     memset(g_eeprom, 0, sizeof(g_eeprom));
     g_eeprom_ready = false;     /* the next title reads it again, with the front end's settings */
     g_av_saved = 0;
+    g_smc_scratch = 0;
 }
