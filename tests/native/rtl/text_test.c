@@ -569,8 +569,32 @@ static void test_printf_bounds(void)
     PF(big, "%.600d", 1);                       /* precision at most 512 */
 }
 
+/* ------------------------------------------------------- name match */
+
+static void test_name_match(void)
+{
+    static const struct {
+        const char *mask, *name;
+        int want;
+    } k[] = {
+        {"*", "English", 1},         {"*", "a.b", 1},              {"Flash.dpk", "flash.DPK", 1},
+        {"Flash.dpk", "Flash.dp", 0}, {"_filler???", "_filler012", 1}, {"_filler???", "_filler01", 0},
+        {"*.xmv", "Blank.xmv", 1},   {"*.xmv", "a.b.xmv", 1},      {"*.xmv", "a.xmv.bak", 0},
+        {"*.xmv", "xmv", 0},         {"*.", "English", 1},         {"*.", "English - UK", 1},
+        {"*.", "Flash.dpk", 0},      {"*.", "a.b", 0},             {"*.*", "English", 1},
+        {"*.*", "Flash.dpk", 1},     {"save*.*", "save1", 1},      {"save*.*", "save1.dat", 1},
+        {"save*.*", "load1.dat", 0}, {"a?c", "abc", 1},            {"a?c", "ac", 0},
+        {"", "x", 0},
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        const int got = nc_rtl_name_match(k[i].mask, k[i].name);
+        check(got == k[i].want, "name match '%s' '%s' -> %d", k[i].mask, k[i].name, k[i].want);
+    }
+}
+
 int main(void)
 {
+    test_name_match();
     test_case();
     test_latin1();
     test_compare();

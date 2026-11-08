@@ -79,6 +79,15 @@ uint32_t nc_rtl_integer_to_char(uint32_t value, uint32_t base, uint32_t length, 
  * dst->len is set even when BUFFER_OVERFLOW (no room for both). */
 uint32_t nc_rtl_integer_to_unicode(uint32_t value, uint32_t base, NcRtlStr *dst);
 
+/* Whether name matches a directory query's mask (NtQueryDirectoryFile),
+ * case-insensitively: '?' is one character, '*' any run, with the dot rules
+ * of Windows' FindFirstFile. The title's library passes FindFirstFile's
+ * mask unchanged, so the kernel applies them: "*.*" is "*", a '*' before a
+ * '.' stops at the name's last dot, and a '.' before '*', '?' or the mask's
+ * end also matches the end of a name without one. "*." lists the names
+ * without an extension (Trivial Pursuit - Unhinged's language folders). */
+bool nc_rtl_name_match(const char *mask, const char *name);
+
 /* RtlMapGenericMask: GENERIC_READ, _WRITE, _EXECUTE and _ALL replaced by
  * map's four masks. */
 uint32_t nc_rtl_map_generic(uint32_t mask, const uint32_t map[4]);

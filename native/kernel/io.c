@@ -12,6 +12,7 @@
  * before the call returns; APC completion routines are not delivered yet.
  */
 #include "native/kernel/kernel.h"
+#include "native/kernel/rtl_text.h"
 #include "native/kernel/xc_crypto.h"
 #include "native/core/irq.h"
 #include "native/core/chd.h"
@@ -215,25 +216,6 @@ static void ansi(NcKernel *k, uint32_t str, char *out, size_t cap)
     }
     memcpy(out, nc_vm_host(k->vm, buf), len);
     out[len] = 0;
-}
-
-static bool wildcard(const char *pat, const char *s)
-{
-    if (!*pat) {
-        return !*s;
-    }
-    if (*pat == '*') {
-        for (;; s++) {
-            if (wildcard(pat + 1, s)) {
-                return true;
-            }
-            if (!*s) {
-                return false;
-            }
-        }
-    }
-    return *s && (*pat == '?' || toupper((unsigned char)*pat) == toupper((unsigned char)*s)) &&
-           wildcard(pat + 1, s + 1);
 }
 
 /* ----------------------------------------------------------- namespace */
@@ -2351,7 +2333,7 @@ static uint64_t NtQueryDirectoryFile(NcKernel *k, NcFrame *f, const uint32_t *a)
     const DirEntry *entries = nf->listing;
     const unsigned n = nf->nlisting;
     unsigned i = nf->dir_next;
-    while (i < n && !wildcard(nf->mask, entries[i].name)) {
+    while (i < n && !nc_rtl_name_match(nf->mask, entries[i].name)) {
         i++;
     }
     uint32_t st;

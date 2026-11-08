@@ -264,6 +264,42 @@ uint32_t nc_rtl_integer_to_unicode(uint32_t value, uint32_t base, NcRtlStr *dst)
     return NC_RTL_SUCCESS;
 }
 
+static char ascii_upper(char c)
+{
+    return c >= 'a' && c <= 'z' ? (char)(c - 'a' + 'A') : c;
+}
+
+static bool name_match(const char *m, const char *s)
+{
+    if (!*m) {
+        return !*s;
+    }
+    if (*m == '*') {
+        const char *end = s + strlen(s);
+        const char *dot = m[1] == '.' ? strrchr(s, '.') : NULL;
+        if (dot) {
+            end = dot;                  /* not past the name's last dot */
+        }
+        for (const char *p = s;; p++) {
+            if (name_match(m + 1, p)) {
+                return true;
+            }
+            if (p == end) {
+                return false;
+            }
+        }
+    }
+    if (*m == '.' && !*s && (m[1] == '*' || m[1] == '?' || !m[1])) {
+        return name_match(m + 1, s);    /* the end of a name without a dot */
+    }
+    return *s && (*m == '?' || ascii_upper(*m) == ascii_upper(*s)) && name_match(m + 1, s + 1);
+}
+
+bool nc_rtl_name_match(const char *mask, const char *name)
+{
+    return name_match(strcmp(mask, "*.*") ? mask : "*", name);
+}
+
 uint32_t nc_rtl_map_generic(uint32_t mask, const uint32_t map[4])
 {
     for (unsigned i = 0; i < 4; i++) {
