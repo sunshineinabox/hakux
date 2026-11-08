@@ -120,7 +120,7 @@ typedef struct HleFfStage {
     uint32_t colorop, colorarg0, colorarg1, colorarg2;
     uint32_t alphaop, alphaarg0, alphaarg1, alphaarg2;
     uint32_t resultarg;
-    uint8_t texture;                  /* a texture is bound to this stage */
+    uint8_t texture;                  /* Bit 0 marks a bound texture. Bits 1–3 mark U, V, and W clamp axes. */
     uint8_t tex_dim;                  /* 2 = 2D, 3 = cube, 4 = volume */
     uint8_t alpha_kill;               /* D3DTSS_ALPHAKILL: texel alpha 0 discards */
     uint8_t unset;                    /* no texture set (D3D's Textures[stage] NULL): an

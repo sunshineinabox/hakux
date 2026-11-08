@@ -11,6 +11,30 @@
   `tools/mods/xbe-to-cht.py` converts IPS and BPS patches (with Floating IPS)
   or a patched XBE.
 
+## linux-v0.22.0 (Linux, aarch64 and x86-64, and Android)
+
+### Graphics
+
+- **NV2A logic operations** — Apply framebuffer logic operations on
+  Vulkan GPUs that support them. Logic operations take precedence over
+  blending, and invalid register values leave the previous state intact.
+- **GL-style texture clamping** — Keep the edge texel with nearest
+  filtering and blend with the border color with linear filtering.
+  Mip selection still uses the original texture gradients, and fractional
+  minimum and maximum LOD limits are now applied with mipmapping.
+  Draws that do not use GL-style clamp keep their existing shader cache keys.
+
+These paths were checked with shader tests and Linux smoke tests.
+Their use in retail games and output on Xbox hardware remain unverified.
+
+### Licensing
+
+- Clarify which hakuX-lr files are available under GPL-2.0-or-later and
+  document upstream hakuX, xemu, and the combined core's licensing in
+  `LICENSE`.
+
+The Android ARM64 core remains experimental and targets Android 9 or newer.
+
 ## linux-v0.21.0 (Linux, aarch64 and x86-64)
 
 This release brings the measured Xbox voice processor behavior from xemu

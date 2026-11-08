@@ -196,7 +196,9 @@ static void tss(uint32_t *t, unsigned s)
     int32_t lod = (int32_t)(filt << 19) >> 19;          /* signed 5.8 */
     float bias = lod / 256.0f;
     memcpy(&t[TSS_MIPMAPLODBIAS], &bias, 4);
-    t[TSS_MAXMIPLEVEL] = (ctl0 >> 26) & 0xF;            /* min LOD clamp, 4.8 */
+    /* Pack the minimum's integer and fractional parts in bits 0–3 and 8–15.
+     * Bits 16–27 hold the 4.8 maximum. */
+    t[TSS_MAXMIPLEVEL] = ((ctl0 >> 26) & 0xF) | ((ctl0 >> 18) & 0xFF) << 8 | ((ctl0 >> 6) & 0xFFF) << 16;
     t[TSS_COLORKEYOP] = ctl0 & 3;
     t[TSS_COLORKEYCOLOR] = R(0x0AE0 + 4 * s);           /* SET_COLOR_KEY_COLOR */
     t[TSS_ALPHAKILL] = (ctl0 >> 2) & 1;
