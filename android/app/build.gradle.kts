@@ -115,8 +115,19 @@ android {
 // and cheats per game, patches/mods/README.md), packed as the APK's
 // assets/mods for the library's Mods & cheats; its README stays out.
 // `git submodule update --init patches` fetches it.
+val modSources = rootProject.file("../patches/mods")
+// An uninitialised submodule would make an APK without its mods (a Sync
+// with no source is skipped, so the check is a task of its own).
+val checkModSources = tasks.register("checkModSources") {
+  doLast {
+    if (!modSources.isDirectory) {
+      throw GradleException("patches/mods is missing: run git submodule update --init patches")
+    }
+  }
+}
 val syncModAssets = tasks.register<Sync>("syncModAssets") {
-  from(rootProject.file("../patches/mods")) { exclude("README.md") }
+  dependsOn(checkModSources)
+  from(modSources) { exclude("README.md") }
   into(layout.buildDirectory.dir("generated/modAssets/mods"))
 }
 tasks.named("preBuild") { dependsOn(syncModAssets) }
