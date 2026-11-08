@@ -353,8 +353,9 @@ static bool has(const char *s, const char *what)
 
 static const uint8_t GUEST_MAC[6] = { 0x00, 0x50, 0xf2, 0x12, 0x34, 0x56 };
 static const uint8_t SLIRP_MAC[6] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
-/* nat.c leases the console 10.0.2.(16 + hash(MAC[3..5]) % 200): 212 for this MAC */
-static const uint8_t GUEST_IP[4] = { 10, 0, 2, 212 };
+/* net=nat leases the console 10.0.2.15, the UDP 3074 forward's target (net=all
+ * one from its MAC, 10.0.2.16-215: nc_net_nat_shared) */
+static const uint8_t GUEST_IP[4] = { 10, 0, 2, 15 };
 static const uint8_t GATEWAY_IP[4] = { 10, 0, 2, 2 };
 
 static uint16_t ip_checksum(const uint8_t *p, size_t n)
@@ -369,7 +370,7 @@ static uint16_t ip_checksum(const uint8_t *p, size_t n)
     return (uint16_t)~sum;
 }
 
-/* "who has 10.0.2.2, tell 10.0.2.212": libslirp learns the console's MAC. */
+/* "who has 10.0.2.2, tell 10.0.2.15": libslirp learns the console's MAC. */
 static void console_arp(void)
 {
     uint8_t f[42] = { 0 };

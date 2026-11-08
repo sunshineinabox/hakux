@@ -191,7 +191,8 @@ output, 3 dB down in each channel. Voice with another player is untested.
 microphone's first 60 seconds as raw 16-bit mono.
 
 Insignia mode uses upstream's NAT backend (`native/net/nat.c`, libslirp).
-The console gets an address from its MAC (10.0.2.16-215) via DHCP and uses Insignia's DNS server,
+The console gets 10.0.2.15 via DHCP (with system link as well, `all`: an address from its MAC,
+10.0.2.16-215) and uses Insignia's DNS server,
 46.101.64.175. If your provider blocks that server, put an insigniaDNS
 server's address in `insignia-dns.txt` in the save directory, using the same
 format as `lan-peers.txt`. Only the first address is used. To boot the Xbox

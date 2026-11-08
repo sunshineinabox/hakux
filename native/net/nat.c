@@ -151,6 +151,13 @@ static void nat_forward(const NcNetConfig *c, struct in_addr guest)
     }
 }
 
+static bool g_nat_shared;               /* beside the LAN (net=all): a MAC-derived lease */
+
+void nc_net_nat_shared(bool shared)
+{
+    g_nat_shared = shared;
+}
+
 bool nc_net_nat_address(const uint8_t mac[6])
 {
     return mac[0] == 0x52 && mac[1] == 0x55;   /* libslirp's: 52:55 and the address */
@@ -182,10 +189,11 @@ static bool nat_start(const uint8_t mac[6])
     inet_pton(AF_INET, "10.0.2.0", &cfg.vnetwork);
     inet_pton(AF_INET, "255.255.255.0", &cfg.vnetmask);
     inet_pton(AF_INET, "10.0.2.2", &cfg.vhost);
-    /* the console's own address: libslirp leases from vdhcp_start */
+    /* the console's own address: libslirp leases from vdhcp_start; beside
+     * the LAN one from its MAC (consoles on one link differ), alone .15 */
     const uint32_t h = ((uint32_t)mac[3] * 31u + mac[4]) * 31u + mac[5];
     char start[16];
-    snprintf(start, sizeof(start), "10.0.2.%u", 16 + h % 200);
+    snprintf(start, sizeof(start), "10.0.2.%u", g_nat_shared ? 16 + h % 200 : 15);
     inet_pton(AF_INET, start, &cfg.vdhcp_start);
     g_nat.slirp = slirp_new(&cfg, &g_cb, NULL);
     if (!g_nat.slirp) {

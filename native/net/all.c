@@ -21,11 +21,14 @@ static int g_nat_fds;                   /* this round's: the NAT's first, then t
 
 static bool all_init(void)
 {
+    nc_net_nat_shared(true);
     if (!nc_net_nat.init()) {
+        nc_net_nat_shared(false);
         return false;
     }
     if (!nc_net_lan.init()) {
         nc_net_nat.close();
+        nc_net_nat_shared(false);
         return false;
     }
     return true;
@@ -36,6 +39,7 @@ static void all_close(void)
 {
     nc_net_nat.close();
     nc_net_lan.close();
+    nc_net_nat_shared(false);
 }
 
 static void all_input(const uint8_t *frame, size_t len)

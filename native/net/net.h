@@ -110,6 +110,10 @@ extern const NcNetBackend nc_net_nat, nc_net_lan, nc_net_kai, nc_net_all;
 /* nat.c: whether a frame's destination is the NAT's own (its gateway's and
  * DNS's addresses, 52:55:...): all.c sends those to it alone. */
 bool nc_net_nat_address(const uint8_t mac[6]);
+/* nat.c: run beside the LAN (all.c), before its init: each console leases
+ * a MAC-derived address, 10.0.2.16-215; alone, NAT keeps 10.0.2.15, where
+ * the UDP 3074 forward and consoles set up by hand expect it. */
+void nc_net_nat_shared(bool shared);
 
 /* A backend, on the network thread: a frame for the guest. */
 void nc_net_deliver(const uint8_t *frame, size_t len);
