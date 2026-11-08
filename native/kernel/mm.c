@@ -31,7 +31,10 @@
 #define USER_HI   0x7FFE0000u
 #define VA_GRAIN  0x10000u
 #define MAX_REGIONS 4096
-#define MAX_CONTIG  4096
+/* The kernel keeps no list of blocks (each page's frame entry has its
+ * state), so every page of a 128 MiB console can be a block. Wings of War,
+ * Shrek Super Party and SVC Chaos hold over 4,000 4 KiB blocks. */
+#define MAX_CONTIG  ((128u << 20) / NC_PAGE)
 
 typedef struct Region {
     uint32_t base, size, protect;
