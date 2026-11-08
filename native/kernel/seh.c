@@ -187,14 +187,14 @@ static void log_thrown(NcKernel *k, uint32_t obj)
 /* A new level below esp; levels a jump out of a handler left behind go. */
 static NcSeh *push_level(NcKernel *k, NcFrame *f, NcThread *t, uint32_t esp)
 {
-    while (t->nseh && t->seh[t->nseh - 1].base < esp) {
+    while (t->nseh && t->seh_levels[t->nseh - 1].base < esp) {
         t->nseh--;
     }
     if (t->nseh == NC_MAX_SEH) {
         nc_kernel_request_stop(k, f, "seh: exceptions nested too deep");
         return NULL;
     }
-    NcSeh *l = &t->seh[t->nseh++];
+    NcSeh *l = &t->seh_levels[t->nseh++];
     memset(l, 0, sizeof(*l));
     l->base = (esp - LV_SIZE) & ~15u;
     l->ctx = l->base + LV_CTX;
@@ -218,7 +218,7 @@ static void unhandled(NcKernel *k, NcFrame *f, NcSeh *l, const char *why)
 /* Calls the handler of the level's registration, or ends the level. */
 static void step(NcKernel *k, NcFrame *f, NcThread *t)
 {
-    NcSeh *l = &t->seh[t->nseh - 1];
+    NcSeh *l = &t->seh_levels[t->nseh - 1];
     if (l->unwind && (l->reg == l->target || (l->reg == CHAIN_END && !l->target))) {
         t->nseh--;
         resume(k, f, l->ctx); /* back from RtlUnwind */
@@ -402,14 +402,14 @@ static void handler_returned(NcKernel *k, NcFrame *f)
 {
     NcThread *t = k->current;
     const uint32_t esp = nc_frame_gpr(f, NC_ESP);
-    while (t && t->nseh && t->seh[t->nseh - 1].base + 4 < esp) {
+    while (t && t->nseh && t->seh_levels[t->nseh - 1].base + 4 < esp) {
         t->nseh--;
     }
-    if (!t || !t->nseh || t->seh[t->nseh - 1].base + 4 != esp) {
+    if (!t || !t->nseh || t->seh_levels[t->nseh - 1].base + 4 != esp) {
         nc_kernel_request_stop(k, f, "seh: a handler returned with no dispatch of its own (esp %08x)", esp);
         return;
     }
-    NcSeh *l = &t->seh[t->nseh - 1];
+    NcSeh *l = &t->seh_levels[t->nseh - 1];
     set_chain_head(k, rd(k, l->base + LV_REG)); /* the kernel's registration goes */
     const uint32_t disp = nc_frame_gpr(f, NC_EAX), reported = rd(k, l->base + LV_DISP);
     uint32_t flags = rd(k, l->rec + ER_FLAGS);

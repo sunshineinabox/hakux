@@ -58,3 +58,8 @@ One entry per section version (tools/native/statelock.py).
 
 - NcThread.priority is the current priority and KTHREAD.BasePriority the base (priority boosts after waits, the Xbox kernel's); v2 states: the priority was the base, copied to KTHREAD.BasePriority as they load
 - upgraded: v1..v2 states load
+
+## THRD v4 (2026-11-08, after 7f7f61c3b5)
+
+- NcThread.seh_more: exception levels 9-64 (NC_MAX_SEH 8 -> 64)
+- upgraded: v1..v3 states load

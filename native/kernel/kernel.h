@@ -127,7 +127,10 @@ typedef struct NcSeh {
     uint32_t nested;         /* dispatch: the frame a nested raise came from */
     uint32_t target;         /* unwind: TargetFrame */
 } NcSeh;
-#define NC_MAX_SEH 8
+/* Levels in progress on a thread: the console's limit is the stack (XIII
+ * throws from inside catch blocks, a dispatch and an unwind per throw). */
+#define NC_MAX_SEH 64
+#define NC_SEH_V1  8               /* the levels a THRD v3 state holds */
 
 typedef struct NcThread {
     enum NcThreadState state;
@@ -154,7 +157,15 @@ typedef struct NcThread {
     NcApcChain apc;          /* the chain running (apc.in_apc) */
     NcApcChain apc_outer[NC_MAX_APC_NEST]; /* chains an alertable wait in an APC interrupted */
     unsigned apc_nest;
-    NcSeh seh[NC_MAX_SEH];
+    /* the dispatches and unwinds in progress (seh.c), stored as their
+     * first NC_SEH_V1 levels (seh) and, since THRD v4, the rest */
+    union {
+        NcSeh seh_levels[NC_MAX_SEH];
+        struct {
+            NcSeh seh[NC_SEH_V1];
+            NcSeh seh_more[NC_MAX_SEH - NC_SEH_V1];
+        };
+    };
     unsigned nseh;
     bool fresh;              /* ctx was just set up (an ISR or DPC entry): the
                                 running frame must not be saved over it */
