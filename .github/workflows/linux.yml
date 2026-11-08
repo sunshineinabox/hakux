@@ -66,6 +66,8 @@ jobs:
           path: |
             build/package/hakux-${{ steps.version.outputs.version }}-aarch64.tar.gz
             build/package/hakux-${{ steps.version.outputs.version }}-aarch64.tar.gz.sha256
+            build/package/hakux-${{ steps.version.outputs.version }}-standalone-aarch64
+            build/package/hakux-${{ steps.version.outputs.version }}-standalone-aarch64.sha256
           if-no-files-found: error
 
   # x86-64 Linux (#56): the core with the KVM backend and the DSP JIT and
@@ -110,6 +112,8 @@ jobs:
           path: |
             build/package/hakux-${{ steps.version.outputs.version }}-x86_64.tar.gz
             build/package/hakux-${{ steps.version.outputs.version }}-x86_64.tar.gz.sha256
+            build/package/hakux-${{ steps.version.outputs.version }}-standalone-x86_64
+            build/package/hakux-${{ steps.version.outputs.version }}-standalone-x86_64.sha256
           if-no-files-found: error
 
   release:

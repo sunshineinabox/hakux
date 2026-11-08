@@ -120,6 +120,28 @@ not render, create a surface or verify shared-memory imports.
 For Turnip's UBWC-compressed swapchain images, it reports the size and
 modifier without saving an image.
 
+## The standalone front end (hakux)
+
+`hakux` runs a game without RetroArch: a fullscreen SDL3 window through the
+HLE GPU's swapchain, SDL audio, and every gamepad as player 1. It loads the
+system's `libSDL3.so.0` (3.2 or newer) and the Vulkan loader at run time.
+
+```sh
+hakux [option...] <disc image> <data directory>
+hakux none <data directory> dash      # the dashboard, if installed
+```
+
+The data directory holds `hdd/` (the emulated hard disk: `Partition1` is the
+E: drive with the game saves), `cache/` (shader and pipeline caches) and
+`hakux.log`: the core's log goes there, the previous run's kept as
+`hakux.log.1`, unless stderr is a terminal or `HAKUX_LOG=stderr`. Options are the core's
+(`native/core/options.h`) plus `aspect=`, `fxaa=`, `upscale=`, `states=DIR`
+(the quick savestate, `DIR/<disc name>/quick.hxs`) and `exitafter=`. F5 loads
+the quick state, Shift+F5 saves it, Ctrl+Q leaves; SIGTERM leaves after the
+core halts and the hard disk is synced. A title's relaunch or a state load
+runs hakux again in the same process. Releases carry it as
+`hakux-<version>-standalone-<arch>`.
+
 ## The libretro core
 
 Load `hakux_libretro.so` in RetroArch with its Vulkan video driver and open
