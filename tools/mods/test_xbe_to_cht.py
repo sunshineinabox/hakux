@@ -92,6 +92,15 @@ def main():
         rc, out, err = convert(tmp / 'stock.xbe', tmp / 'dense.xbe')
         n = len(re.findall(r'\+[0-9A-F]{8}:', out))
         check(rc == 0 and n == 86, f'packed as they come: {n} runs ({err.strip()})')
+        # sparse: 129 single-byte edits 6 unchanged bytes apart are 129 runs
+        # at the compact gap, so a wider one packs them (64-byte runs)
+        sparse = bytearray(stock)
+        for i in range(129):
+            sparse[0x200 + 7 * i] ^= 0xFF
+        (tmp / 'sparse.xbe').write_bytes(sparse)
+        rc, out, err = convert(tmp / 'stock.xbe', tmp / 'sparse.xbe')
+        n = len(re.findall(r'\+[0-9A-F]{8}:', out))
+        check(rc == 0 and n <= 128, f'sparse edits fit with a wider gap: {n} runs ({err.strip()})')
         for name, data, why in (('longer.xbe', bytes(patched) + b'\0', 'keeps the size'),
                                 ('same.xbe', bytes(stock), 'changes nothing'),
                                 ('many.xbe', bytes(b ^ 1 if 4 <= i < 0x3FFF and i % 16 == 4 else b

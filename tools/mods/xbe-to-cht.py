@@ -24,6 +24,7 @@ import zlib
 RUN_MAX = 64            # bytes a run
 RUNS_MAX = 128          # runs an entry
 BRIDGE = 5              # unchanged bytes taken into a run rather than a new one ("+OFFSET:" is 10 digits)
+WIDER = (8, 16, 32, 63)  # gaps tried after it when the runs don't fit RUNS_MAX
 
 
 def fail(why):
@@ -75,15 +76,15 @@ def spans(a, b):
     return out
 
 
-def runs(stock, patched):
+def runs(stock, patched, bridge=BRIDGE):
     """the differing stretches packed into runs of up to RUN_MAX bytes as
-    they come: a stretch BRIDGE or fewer unchanged bytes after the run goes
+    they come: a stretch bridge or fewer unchanged bytes after the run goes
     into it while there's room (a long stretch's last part takes the edits
     after it too)"""
     out, cur = [], None             # cur: [start, end) of the run being filled
     for s, e in spans(stock, patched):
         while s < e:
-            if cur and s - cur[1] <= BRIDGE and s < cur[0] + RUN_MAX:
+            if cur and s - cur[1] <= bridge and s < cur[0] + RUN_MAX:
                 cur[1] = min(e, cur[0] + RUN_MAX)
             else:
                 if cur:
@@ -102,6 +103,10 @@ def code(stock, patched):
         fail(f'the patched XBE is {len(patched)} bytes, the stock one {len(stock)}: '
              'xbe-patch-v1 keeps the size')
     found = runs(stock, patched)
+    for bridge in WIDER:                # sparse edits: wider gaps before refusing
+        if len(found) <= RUNS_MAX:
+            break
+        found = runs(stock, patched, bridge)
     if not found:
         fail('the patch changes nothing')
     if found[0][0] < 4:

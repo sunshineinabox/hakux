@@ -392,7 +392,8 @@ def main():
                    dict(late, HARNESS_CHEATS=patch(), HARNESS_CHEATS_AT='r1,m10', HARNESS_CHEATS_OFF_AT='m5'))
         # RetroArch numbers the cheats that are on: a memory cheat turned off
         # before the patch moves it from 1 to 0, the same patch, nothing to tell
-        run_counts(xp[:3] + [300] + xp[4:], {'XBE patches changed since the boot': 0, 'XBE patch (cheat 1)': 1},
+        run_counts(xp[:3] + [300] + xp[4:],
+                   {'XBE patches changed since the boot': 0, 'XBE patch (cheat 1)': 1, 'cheats: 1 applied': 1},
                    dict(vk, HARNESS_CHEATS=f'w8 0x10E04 1|{patch()}', HARNESS_CHEATS2=patch(),
                         HARNESS_READY='stage S0 xbe loaded', HARNESS_CHEATS2_AT='r5'))
         # M2: the core stops in the process and boots again: 100 games and 20

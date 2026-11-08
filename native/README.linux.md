@@ -174,8 +174,8 @@ To use one, load the `.cht` under **Quick Menu → Cheats**, enable the entry,
 choose **Apply Changes**, then **Quick Menu → Restart**; the core shows a
 reminder when the enabled patches differ from the running game's. For a
 widescreen patch, set **Screen Format** to **Widescreen** and RetroArch's
-aspect ratio to **Core provided**. Disable the entry and restart to return to
-the original XBE.
+aspect ratio to **Core provided**. To return to the original XBE, disable the
+entry, choose **Apply Changes**, then restart.
 
 `tools/mods/xbe-to-cht.py` writes the `.cht` from the stock XBE and either an
 IPS or BPS patch (applied with Floating IPS, `flips`) or the patched XBE; all
