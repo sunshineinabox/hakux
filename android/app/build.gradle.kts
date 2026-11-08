@@ -107,15 +107,16 @@ android {
     buildConfig = true    // BuildConfig.DEBUG: what only debug builds show (the hitch line)
   }
 
-  // The repository's mods/ folder as assets/mods (syncModAssets below).
+  // The patches submodule's mods/ folder as assets/mods (syncModAssets below).
   sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/modAssets").get().asFile)
 }
 
-// The repository's mods/ folder (mods and cheats per game: mods/README.md),
-// packed as the APK's assets/mods for the library's Mods & cheats; its
-// README stays out.
+// The patches submodule's mods/ folder (portare-ch/hakux-lr-patches: mods
+// and cheats per game, patches/mods/README.md), packed as the APK's
+// assets/mods for the library's Mods & cheats; its README stays out.
+// `git submodule update --init patches` fetches it.
 val syncModAssets = tasks.register<Sync>("syncModAssets") {
-  from(rootProject.file("../mods")) { exclude("README.md") }
+  from(rootProject.file("../patches/mods")) { exclude("README.md") }
   into(layout.buildDirectory.dir("generated/modAssets/mods"))
 }
 tasks.named("preBuild") { dependsOn(syncModAssets) }

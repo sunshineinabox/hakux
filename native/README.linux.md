@@ -141,7 +141,7 @@ closing a game exits RetroArch, and switching game executables relaunches it.
 
 Cheats come from RetroArch's **Cheats** menu or a `.cht` file. A cheat's
 code is one or more codes joined by `+`, spaces or newlines: the code lines
-of [mods/README.md](../mods/README.md#cheats-cheatstxt) (`w32 0x0034A5C8 99`,
+of [patches/mods/README.md](../patches/mods/README.md#cheats-cheatstxt) (`w32 0x0034A5C8 99`,
 `if16 0x00ABCDE0 != 0 + w16 [0x00456700]+0x1C 0x00C8 + end`), or
 `AAAAAAAA VVVVVVVV`, which writes the 32-bit hex value V at the hex address
 A. Cheats apply from the next frame, also when applied before the game has

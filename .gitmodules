@@ -2,3 +2,6 @@
 	path = external/fex
 	url = https://github.com/rfandango/FEX.git
 	branch = hakuX
+[submodule "patches"]
+	path = patches
+	url = https://github.com/portare-ch/hakux-lr-patches.git

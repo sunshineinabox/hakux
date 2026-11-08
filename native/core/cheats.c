@@ -1,5 +1,5 @@
 /*
- * hakuX native core — cheats (cheats.h; the format in mods/README.md).
+ * hakuX native core — cheats (cheats.h; the format in patches/mods/README.md).
  *
  * Each code line compiles to an op in one pool: a write, an if, else or end.
  * An address is a base and up to four pointer steps ([A]+N reads the 32-bit

@@ -1,4 +1,4 @@
-"""halo_120fps.py XBE [OUT]: Halo's 120 fps mod (mods/4D530004.9/120fps/mod.txt)
+"""halo_120fps.py XBE [OUT]: Halo's 120 fps mod (patches/mods/4D530004.9/120fps/mod.txt)
 from its default.xbe: the header, then the XBE patches (to OUT, else stdout).
 The 60 fps mod's (halo_60fps.py, left as it is) with the vblank at 120 Hz:
 the same code, whose t steps by the frames' tick fractions (a quarter tick at

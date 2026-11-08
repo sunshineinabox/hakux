@@ -1,5 +1,5 @@
 /*
- * hakuX native core — mods and cheats for the title (mods/README.md), from
+ * hakuX native core — mods and cheats for the title (patches/mods/README.md), from
  * the manifest the app writes for the run (NativeCoreActivity, "mods=<file>"):
  *
  *   file  <TAB> <disc path> <TAB> <host file>      a disc file replaced or added

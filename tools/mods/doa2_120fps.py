@@ -1,5 +1,5 @@
 """doa2_120fps.py XBE [OUT]: Dead or Alive 2 Ultimate's 120 fps mod
-(mods/54430006.6/120fps/mod.txt) from its doa2.xbe: the header, then the
+(patches/mods/54430006.6/120fps/mod.txt) from its doa2.xbe: the header, then the
 XBE patches, the injected code assembled here (to OUT, else stdout).
 
 The vblank runs at 120 Hz (refresh: 120). The code goes in the header page

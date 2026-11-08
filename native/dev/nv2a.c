@@ -855,7 +855,7 @@ void nc_dev_nv2a_stop(void)
 
 /* ---- the HLE GPU's seams (hw/xbox/hle/host.h) ---- */
 
-/* A mod's faster vblank (mods/README.md refresh:): the video mode's rate
+/* A mod's faster vblank (patches/mods/README.md refresh:): the video mode's rate
  * times this; a frame-locked title paced by vblanks then runs that much
  * faster unless the mod halves its steps. */
 static unsigned g_mode_hz = 60, g_vblank_mul = 1;

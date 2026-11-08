@@ -23,7 +23,7 @@ pending tasks below describe that checkout; for this fork's status, see
 - In progress: item 9 (tools tracked, `.gitattributes`, docs, stale perf
   maps). Next: item 10 (appCategory game, backup rules), then the Next
   table.
-- Not committed, on purpose: the DOA3 120 fps mod (`mods/4D53002D.1/`,
+- Not committed, on purpose: the DOA3 120 fps mod (`patches/mods/4D53002D.1/`,
   `tools/mods/doa3_*`). It does not work properly; never commit it.
 - Savestates restore the guest's kernel area, its guest-code fast paths
   included (the IRQL exports, item 5): a change to them shows only on a
@@ -57,7 +57,7 @@ DOA2 mod (below).
   (`NC_F`, or `NC_SKIP` for what isn't saved), then
   `python tools/native/statelock.py --sizes`; the build checks it.
 
-## Paused: DOA2 120 fps mod (`mods/54430006.6/120fps`)
+## Paused: DOA2 120 fps mod (`patches/mods/54430006.6/120fps`)
 
 Paused on 2026-10-20 for another task. The user's request: a 120 fps mod
 for Dead or Alive 2 Ultimate (`54430006.6`, `doa2.xbe`), made as a mod

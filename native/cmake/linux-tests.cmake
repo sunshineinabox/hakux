@@ -89,6 +89,9 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 # The .cht converter for XBE patches (its IPS and BPS cases with Floating IPS).
 add_test(NAME xbe-to-cht COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tools/mods/test_xbe_to_cht.py")
 set_tests_properties(xbe-to-cht PROPERTIES TIMEOUT 30)
+# The Android-format mods' converter (patches/mods' mod.txt to a .cht).
+add_test(NAME mod-to-cht COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tools/mods/test_mod_to_cht.py")
+set_tests_properties(mod-to-cht PROPERTIES TIMEOUT 30)
 if(NC_GUEST_TESTS)
   add_test(NAME linux-boundaries
            COMMAND "${Python3_EXECUTABLE}" "${NC_REPO}/tests/native/linux/check.py" "$<TARGET_FILE_DIR:xboxrun>")

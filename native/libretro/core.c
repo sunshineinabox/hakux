@@ -931,7 +931,7 @@ RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char *code)
     }
     nc_xbe_patch_front_set(index, false, NULL, NULL, 0);
     if (!nc_cheat_front_set(index, enabled, code, err, sizeof(err)) && !cheat_told(code)) {
-        nc_log("hakuX-libretro", "cheat %u \"%s\": %s; it stays off (mods/README.md has the codes)", index, code,
+        nc_log("hakuX-libretro", "cheat %u \"%s\": %s; it stays off (patches/mods/README.md has the codes)", index, code,
                err);
     }
 }

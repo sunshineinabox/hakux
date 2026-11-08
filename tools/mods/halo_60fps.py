@@ -1,4 +1,4 @@
-"""halo_60fps.py XBE [OUT]: Halo's 60 fps mod (mods/4D530004.9/60fps/mod.txt)
+"""halo_60fps.py XBE [OUT]: Halo's 60 fps mod (patches/mods/4D530004.9/60fps/mod.txt)
 from its default.xbe: the header, then the XBE patches (to OUT, else stdout).
 
 halo_60fps.asm (next to this script, assembled with NASM: $NASM, else nasm on

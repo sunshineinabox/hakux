@@ -1,5 +1,5 @@
 """pdo_120fps.py XBE [OUT]: Panzer Dragoon Orta's 120 fps mod
-(mods/53450007.1/120fps/mod.txt) from its default.xbe: the header, then the
+(patches/mods/53450007.1/120fps/mod.txt) from its default.xbe: the header, then the
 XBE patches, the injected code assembled here (to OUT, else stdout).
 
 The vblank runs at 120 Hz (refresh: 120) and the game presents every vblank
