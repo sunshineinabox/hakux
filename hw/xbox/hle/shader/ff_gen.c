@@ -544,9 +544,25 @@ size_t hle_ff_ps_glsl(const HleFfPsKey *k, char *buf, size_t cap)
                         "      ((pc.flags & %uu) != 0u ? float(pc.flags >> 24) : 1.0);\n",
                     s, s, 1u << s, s, s, 256u << s);
             }
-            put(&b, "  vec4 t%u = texture(sampler2D(uTex2D[nonuniformEXT(pc.tex[%u] & 0xFFFFu)], "
-                    "uSmp[nonuniformEXT(pc.tex[%u] >> 16)]), uv%u);\n",
-                s, s, s, s);
+            /* Use unclamped gradients for LOD and keep nearest samples inside the texture. */
+            if (st->texture & 6) {
+                put(&b, "  vec2 g%ux = dFdx(uv%u), g%uy = dFdy(uv%u);\n", s, s, s, s);
+            }
+            if (st->texture & 2) {
+                put(&b, "  uv%u.x = clamp(uv%u.x, 0.0, 0.99999994);\n", s, s);
+            }
+            if (st->texture & 4) {
+                put(&b, "  uv%u.y = clamp(uv%u.y, 0.0, 0.99999994);\n", s, s);
+            }
+            if (st->texture & 6) {
+                put(&b, "  vec4 t%u = textureGrad(sampler2D(uTex2D[nonuniformEXT(pc.tex[%u] & 0xFFFFu)], "
+                        "uSmp[nonuniformEXT(pc.tex[%u] >> 16)]), uv%u, g%ux, g%uy);\n",
+                    s, s, s, s, s, s);
+            } else {
+                put(&b, "  vec4 t%u = texture(sampler2D(uTex2D[nonuniformEXT(pc.tex[%u] & 0xFFFFu)], "
+                        "uSmp[nonuniformEXT(pc.tex[%u] >> 16)]), uv%u);\n",
+                    s, s, s, s);
+            }
             if (st->alpha_kill) {               /* D3DTSS_ALPHAKILL */
                 put(&b, "  if (t%u.a == 0.0) discard;\n", s);
             }

@@ -172,7 +172,7 @@ static struct {
     uint32_t next_slot;
     HleVkTex tex[HLE_MAX_TEX];
     HleVkTex white, white_cube, white_3d;
-    struct { uint64_t key, key2; VkSampler s; } smp[HLE_MAX_SAMPLERS];
+    struct { uint64_t key, key2; uint32_t key3; VkSampler s; } smp[HLE_MAX_SAMPLERS];
     uint32_t nsmp;
     struct { uint32_t id, ord; VkImageView view, cube; uint64_t gen; uint32_t slot; } sslot[256];
     uint32_t nsslot;
@@ -1802,9 +1802,22 @@ static VkSamplerAddressMode addr_mode(uint32_t a)
     case 2:  return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
     case 3:  return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;    /* D3DTADDRESS_CLAMP */
     case 4:  return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-    case 5:  return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;    /* CLAMPTOEDGE */
+    case 5:  return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;  /* CLAMP_OGL uses shader clamping. */
     default: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
     }
+}
+
+/* Mode 5 axis mask. The shader clamps these axes before border sampling. */
+static unsigned gl_clamp_axes(const uint32_t *t)
+{
+    const unsigned a = ((t[TSS_ADDRESSU] & 7) == 5) | ((t[TSS_ADDRESSV] & 7) == 5) << 1 |
+                       ((t[TSS_ADDRESSW] & 7) == 5) << 2;
+    static unsigned s_logged;
+    if (a && s_logged < 4) {
+        s_logged++;
+        hle_log("hakuX-hle-back", "GL-style clamp (address mode 5) on axes %x", a);
+    }
+    return a;
 }
 
 /* sampler_index, one per stage a draw: the index last found for the key's
@@ -1849,7 +1862,11 @@ static uint16_t slot_sw(uint32_t slot)
 HLE_BUILD_BUG_ON(HLE_MAX_SAMPLERS > 256);
 static uint32_t sampler_index(const uint32_t *tss, uint32_t lod_down, uint16_t sw)
 {
-    uint32_t base = MIN(tss[TSS_MAXMIPLEVEL], 15u);
+    /* Decode the LOD clamps packed by kelvin.c. */
+    const uint32_t lod = tss[TSS_MAXMIPLEVEL];
+    uint32_t base = lod & 0xF;
+    /* Key the fractional minimum and maximum only when mipmapping. */
+    const uint32_t key3 = (tss[TSS_MIPFILTER] & 7) ? lod >> 8 : 0;
     /* CONTROL0's MAX_ANISOTROPY (pb/kelvin.c): the degree the title set,
      * whatever the minification filter, which stays the title's (the NV2A
      * tests vary the degree under nearest filtering; xemu applies it there
@@ -1865,19 +1882,19 @@ static uint32_t sampler_index(const uint32_t *tss, uint32_t lod_down, uint16_t s
     /* sw, the stage's view's component mapping (hle_sw_pack): a sampler of its
      * own where a border can meet it and the device doesn't take the mapping
      * from the view (below) */
-    const bool clamp_border = (tss[TSS_ADDRESSU] & 7) == 4 || (tss[TSS_ADDRESSV] & 7) == 4 ||
-                              (tss[TSS_ADDRESSW] & 7) == 4;
+    const bool clamp_border = (tss[TSS_ADDRESSU] & 7) >= 4 || (tss[TSS_ADDRESSV] & 7) >= 4 ||
+                              (tss[TSS_ADDRESSW] & 7) >= 4;  /* BORDER, CLAMP_OGL */
     if (g_hvk.caps.bcs_image || !clamp_border) {
         sw = 0;
     }
     uint64_t key2 = tss[TSS_MIPMAPLODBIAS] | (uint64_t)lod_down << 32 | (uint64_t)sw << 48;
-    unsigned h = (unsigned)(((key ^ key2 * 0x9E3779B97F4A7C15ull) * 0xFF51AFD7ED558CCDull) >> 54);
+    unsigned h = (unsigned)((((key ^ key3) ^ key2 * 0x9E3779B97F4A7C15ull) * 0xFF51AFD7ED558CCDull) >> 54);
     uint32_t i = g_smp_hot[h];
-    if (i < g_dr.nsmp && g_dr.smp[i].key == key && g_dr.smp[i].key2 == key2) {
+    if (i < g_dr.nsmp && g_dr.smp[i].key == key && g_dr.smp[i].key2 == key2 && g_dr.smp[i].key3 == key3) {
         return i;
     }
     for (i = 0; i < g_dr.nsmp; i++) {
-        if (g_dr.smp[i].key == key && g_dr.smp[i].key2 == key2) {
+        if (g_dr.smp[i].key == key && g_dr.smp[i].key2 == key2 && g_dr.smp[i].key3 == key3) {
             g_smp_hot[h] = (uint16_t)i;
             return i;
         }
@@ -1945,8 +1962,9 @@ static uint32_t sampler_index(const uint32_t *tss, uint32_t lod_down, uint16_t s
         .addressModeU = addr_mode(tss[TSS_ADDRESSU]),
         .addressModeV = addr_mode(tss[TSS_ADDRESSV]),
         .addressModeW = addr_mode(tss[TSS_ADDRESSW]),
-        .mipLodBias = bias, .minLod = (float)base,
-        .maxLod = mip ? VK_LOD_CLAMP_NONE : base + 0.25f,
+        /* Use the LOD range for mipmapping and the base level otherwise. */
+        .mipLodBias = bias, .minLod = mip ? base + (key3 & 0xFF) / 256.0f : (float)base,
+        .maxLod = mip ? MAX((key3 >> 8) / 256.0f, base + (key3 & 0xFF) / 256.0f) : base + 0.25f,
         .anisotropyEnable = aniso > 1,
         .maxAnisotropy = aniso > 1 ? MIN((float)aniso, g_hvk.caps.max_aniso) : 1.0f,
         .borderColor = border };
@@ -1965,6 +1983,7 @@ static uint32_t sampler_index(const uint32_t *tss, uint32_t lod_down, uint16_t s
     g_smp_hot[h] = (uint16_t)i;
     g_dr.smp[i].key = key;
     g_dr.smp[i].key2 = key2;
+    g_dr.smp[i].key3 = key3;
     g_dr.smp[i].s = s;
     if (g_hvk.caps.bindless) {          /* else the draws' sets take it from smp[] */
         VkDescriptorImageInfo ii = { .sampler = s };
@@ -4001,7 +4020,7 @@ static void draw_faces(const HleCmdDraw *c, VkCommandBuffer cb, uint32_t rt_id, 
         /* fixed-function shadow buffers: not yet (white, as before) */
         uint32_t slot = shadow_fmt(c->tex[st]) ? 0 : stage_slot(c, st, rt_id, &lin);
         pc.flags |= (lin >> st & 1) << ki | (lin >> (st + 8) & 1) << (ki + 8);
-        fs->texture = c->tex[st] != 0;
+        fs->texture = c->tex[st] ? (uint8_t)(1u | gl_clamp_axes(t) << 1) : 0;
         fs->unset = c->tex_unset >> st & 1;
         fs->alpha_kill = fs->texture && t[TSS_ALPHAKILL] != 0;
         pc.tex[ki] = slot | sampler_index(t, stage_lod_down(c, st, rt_id), slot_sw(slot)) << 16;
@@ -4143,6 +4162,12 @@ static void draw_faces(const HleCmdDraw *c, VkCommandBuffer cb, uint32_t rt_id, 
                 k.pk.vol |= 1u << st;
             } else if (m == HLE_PST_PROJECT3D && flat && !((k.pk.shadow >> st) & 1)) {
                 k.pk.tex_modes -= (HLE_PST_PROJECT3D - HLE_PST_PROJECT2D) << (5 * st);
+            }
+        }
+        /* Store three clamp bits per stage above the texture modes. */
+        for (unsigned st = 0; st < 4; st++) {
+            if (c->tex[st]) {
+                k.pk.tex_modes |= gl_clamp_axes(s->tss[st]) << (20 + 3 * st);
             }
         }
         /* Clamp texel coordinates to the texture's size for the first stage

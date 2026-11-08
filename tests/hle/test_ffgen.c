@@ -339,8 +339,27 @@ static void test_poly_smooth(void)
     HT_CHECK(cv != NULL && at != NULL && cv < at);
 }
 
+/* Check that the shader clamps only the selected axes. */
+static void test_gl_clamp(void)
+{
+    HleFfPsKey pk = { .nstages = 1 };
+    pk.st[0] = (HleFfStage){ .colorop = 2, .colorarg1 = 2, .alphaop = 2, .alphaarg1 = 2, .resultarg = 1,
+                             .texture = 1 };
+    HT_CHECK(hle_ff_ps_glsl(&pk, buf, sizeof(buf)) > 0);
+    HT_CHECK(strstr(buf, "clamp(uv0") == NULL && strstr(buf, "textureGrad(") == NULL);
+    pk.st[0].texture = 1 | 2;                           /* u */
+    HT_CHECK(hle_ff_ps_glsl(&pk, buf, sizeof(buf)) > 0);
+    HT_CHECK(strstr(buf, "uv0.x = clamp(uv0.x, 0.0, 0.99999994);") != NULL);
+    HT_CHECK(strstr(buf, "textureGrad(") != NULL && strstr(buf, "g0x = dFdx(uv0)") != NULL);
+    HT_CHECK(strstr(buf, "uv0.y = clamp") == NULL);
+    pk.st[0].texture = 1 | 2 | 4;                       /* u and v */
+    HT_CHECK(hle_ff_ps_glsl(&pk, buf, sizeof(buf)) > 0);
+    HT_CHECK(strstr(buf, "uv0.y = clamp(uv0.y, 0.0, 0.99999994);") != NULL);
+}
+
 int main(void)
 {
+    HT_RUN(test_gl_clamp);
     HT_RUN(test_ui_quad);
     HT_RUN(test_fixed_slots);
     HT_RUN(test_zclamp);

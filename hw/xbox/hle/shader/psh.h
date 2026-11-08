@@ -47,7 +47,7 @@ typedef struct HlePshKey {
     uint32_t rgb_in[8], rgb_out[8], alpha_in[8], alpha_out[8];
     uint32_t final_abcd, final_efg;
     uint32_t count;                     /* PSCombinerCount */
-    uint32_t tex_modes;                 /* PSTextureModes */
+    uint32_t tex_modes;                 /* Texture modes in bits 0–19. Three clamp bits per stage above them. */
     uint32_t dot_map;                   /* PSDotMapping */
     uint32_t input_tex;                 /* PSInputTexture */
     uint32_t compare;                   /* PSCompareMode */
