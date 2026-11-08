@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## linux-v0.26.0-rf.1 (RetroForge)
+
+hakuX-lr 0.26.0 with the standalone Linux front end back,
+for RetroForge.
+
+### What's new
+
+- **Standalone `hakux`** — Play without RetroArch: fullscreen through SDL3 and
+  Vulkan, sound through SDL audio, every gamepad as player 1, the title's
+  rumble on all of them. Options are the core's plus the picture's shape,
+  FXAA and upscaling. Released as `hakux-0.26.0-rf.1-standalone-aarch64`.
+- **Quick savestate** — `states=DIR` keeps one state per game; F5 loads it,
+  Shift+F5 saves it.
+- **Clean exit** — SIGTERM and Ctrl+Q stop the core and sync the hard disk
+  before the process ends. A title's relaunch and a state load start hakux
+  again in the same process.
+- **Its own log file** — The core's statistics (about 17 lines a second in a
+  game) go to `hakux.log` in the data directory, not the caller's stderr (a
+  session's journal); `HAKUX_LOG=stderr` keeps them there.
+
 ## linux-v0.26.0 (Linux, aarch64 and x86-64, and Android)
 
 - **Video** (#199) — 480p is enabled by default in RetroArch. PAL60 is
