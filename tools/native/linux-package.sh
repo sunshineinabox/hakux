@@ -1,7 +1,8 @@
 #!/bin/sh
 # Copyright (C) 2026-present PortareOS
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Package a committed libretro build with its metadata and licences.
+# Package a committed libretro build with its metadata and licences, and the
+# standalone front end (hakux), stripped.
 # Run after linux-build.sh in the same image from a clean checkout.
 set -eu
 
@@ -61,6 +62,8 @@ fi
     echo "dependencies (tools/native/linux-deps.json):"
     cat tools/native/linux-deps.json
 } > "$out/$name/BUILD-INFO"
+"${STRIP:-llvm-strip-19}" -o "$out/$name-standalone-$arch" "$build/hakux"
+(cd "$out" && sha256sum "$name-standalone-$arch" > "$name-standalone-$arch.sha256")
 tar -C "$out" --sort=name --owner=0 --group=0 --numeric-owner \
     --mtime="@$(git log -1 --format=%ct)" -cf - "$name" | gzip -n > "$out/$name-$arch.tar.gz"
 cd "$out" && sha256sum "$name-$arch.tar.gz"
