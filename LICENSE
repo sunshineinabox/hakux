@@ -1,17 +1,21 @@
-hakuX is free software: you can redistribute it and/or modify it under the
-terms of the GNU General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later
-version. The full text is in COPYING.
+hakuX-lr licensing
+
+Original hakuX-lr code marked SPDX-License-Identifier: GPL-2.0-or-later
+is available under GNU GPL version 2 or any later version. See
+licenses/GPL-2.0.txt for the version 2 text.
+
+Code inherited from hakuX remains under GPL-3.0-or-later, subject to the
+specific notices in individual files and the third-party terms below.
+The combined hakuX-lr core is distributed under GPL-3.0-or-later. See
+COPYING for the version 3 text. Distributors of binaries must make the
+complete corresponding source available under the applicable GPL terms.
 
 hakuX is distributed in the hope that it will be useful, but WITHOUT ANY
 WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
 A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
-Anyone who distributes hakuX, or a work based on it, in binary form must also
-make its complete corresponding source code available under the same license.
+Third-party code retains its own license and copyright notices.
 
-Parts from other projects keep their own licenses, all compatible with the
-above:
 
 - The MCPX APU (native/dev/apu) is xemu's device, ported to the native core.
   Each of its files keeps the license its header states:
@@ -29,8 +33,9 @@ above:
     version (svf_1214.xml: copyright "GPL"; xemu's header says GPLv2).
   - BSD 3-Clause (licenses/adpcm-xq.license.txt): vp/adpcm.h, the ADPCM-XQ
     decoder (David Bryant).
-  The rest of native/dev/apu (apu_base.h, out.c, state.c, vp/mix_inline.h,
-  vp/resample.*) is hakuX's own.
+  The DSP JIT bridge (dsp/jit.c) is adapted from xemu and retains its
+  GPL-2.0-or-later notice. The voice-processor port includes raddad772's
+  work from https://github.com/xemu-project/xemu/pull/3105.
 - native/kernel/xboxkrnl.exe.def comes from nxdk: CC0-1.0.
 - native/libretro/libretro.h and libretro_vulkan.h are RetroArch's libretro
   API headers: MIT (licenses/libretro.license.txt).
@@ -39,6 +44,5 @@ above:
   General Public License, version 3 or later; its SGSR is Qualcomm's
   Snapdragon Game Super Resolution 1, BSD 3-Clause
   (licenses/snapdragon-gsr.license.txt).
-- The libraries the app bundles (FEX, SDL3, adrenotools, glslang, volk,
-  Vulkan Memory Allocator, SPIRV-Reflect, nv2a_vsh_cpu, and FEX's own
-  dependencies): their licenses are in licenses/.
+- License texts for dependencies are in licenses/. The versions used
+  to build the core are pinned in tools/native/linux-deps.json.

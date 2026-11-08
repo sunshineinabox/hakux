@@ -1,3 +1,4 @@
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -33,7 +34,7 @@
 #define STUB_BUFFER_FRAMES 128
 
 struct VpResampler {
-    int quality;       /* VP_RESAMPLE_*: the linear fields below, or sinc */
+    int quality;       /* VP_RESAMPLE_*: the linear fields below, sinc, or hardware */
     void *sinc;        /* resample_sinc.c's converter, a VpSinc (sinc) */
     vp_resample_cb cb;
     void *cb_data;
@@ -45,7 +46,86 @@ struct VpResampler {
     float input_buf[STUB_BUFFER_FRAMES * STUB_MAX_CHANNELS];
     int input_len;     /* frames currently live in input_buf */
     float input_pos;   /* fractional read cursor in frames; >=0, < input_len */
+
+    /* Hardware mode keeps eight frames around the 16.16 cursor at interp[3].
+     * hw_pos and hw_len track the callback buffer. */
+    float interp[8][STUB_MAX_CHANNELS];
+    uint32_t interp_pos;
+    const float *hw_buf;
+    int hw_len, hw_pos;
 };
+
+/* ---- hardware: 8-point Lagrange interpolation (xemu #3105, raddad772) */
+
+/* Round Lagrange weights to 1/65536. Hardware probes match at eighth-sample
+ * offsets. Interpolation between 1/256 steps is an approximation. */
+static float g_lagrange[257][8];
+static pthread_once_t g_lagrange_once = PTHREAD_ONCE_INIT;
+
+static void lagrange_init(void)
+{
+    for (int r = 0; r <= 256; r++) {
+        for (int k = -3; k <= 4; k++) {
+            double w = 1.0;
+            for (int j = -3; j <= 4; j++) {
+                if (j != k) {
+                    w *= (r / 256.0 - j) / (k - j);
+                }
+            }
+            g_lagrange[r][k + 3] = round(w * 65536.0) / 65536.0;
+        }
+    }
+}
+
+static void hardware_reset(VpResampler *r)
+{
+    memset(r->interp, 0, sizeof(r->interp));
+    r->interp_pos = 5 << 16;            /* the first output is the first frame */
+    r->hw_buf = NULL;
+    r->hw_len = r->hw_pos = 0;
+}
+
+static long hardware_read(VpResampler *r, const uint32_t *steps, double ratio, long frames,
+                          float *data)
+{
+    const int ch = r->channels;
+    const uint32_t step = (uint32_t)(65536.0 / ratio);
+    for (long n = 0; n < frames; n++) {
+        while (r->interp_pos >= 0x10000) {
+            if (r->hw_pos >= r->hw_len) {
+                float *in = NULL;
+                long got = r->cb(r->cb_data, &in);
+                if (got <= 0 || !in) {
+                    return n;
+                }
+                r->hw_buf = in;
+                r->hw_len = (int)got;
+                r->hw_pos = 0;
+            }
+            memmove(r->interp[0], r->interp[1], sizeof(r->interp[0]) * 7);
+            for (int c = 0; c < ch; c++) {
+                r->interp[7][c] = r->hw_buf[r->hw_pos * ch + c];
+            }
+            r->hw_pos++;
+            r->interp_pos -= 0x10000;
+        }
+        const uint32_t frac = r->interp_pos;
+        const float *lo = g_lagrange[frac >> 8], *hi = g_lagrange[(frac >> 8) + 1];
+        const float a = (frac & 0xFF) / 256.0f;
+        for (int c = 0; c < ch; c++) {
+            float acc = r->interp[3][c];
+            if (frac) {
+                acc = 0.0f;
+                for (int k = 0; k < 8; k++) {
+                    acc += (lo[k] + (hi[k] - lo[k]) * a) * r->interp[k][c];
+                }
+            }
+            data[n * ch + c] = acc;
+        }
+        r->interp_pos += steps ? steps[n] : step;
+    }
+    return frames;
+}
 
 static VpResampler *linear_new(vp_resample_cb cb, int channels, void *cb_data)
 {
@@ -254,8 +334,19 @@ bool vp_resample_sinc_available(void)
 #endif
 }
 
+int vp_resample_quality_named(const char *name)
+{
+    return !name                      ? -1 :
+           !strcmp(name, "hardware")  ? VP_RESAMPLE_HARDWARE :
+           !strcmp(name, "sinc")      ? VP_RESAMPLE_SINC :
+           !strcmp(name, "linear")    ? VP_RESAMPLE_LINEAR : -1;
+}
+
 const char *vp_resample_name(int quality)
 {
+    if (quality == VP_RESAMPLE_HARDWARE) {
+        return "hardware (8-point Lagrange)";
+    }
     if (quality != VP_RESAMPLE_SINC) {
         return "linear";
     }
@@ -272,6 +363,12 @@ const char *vp_resample_name(int quality)
 VpResampler *vp_resample_new(vp_resample_cb cb, int quality, int channels, void *cb_data)
 {
     VpResampler *r = linear_new(cb, channels, cb_data);
+    if (r && quality == VP_RESAMPLE_HARDWARE) {
+        pthread_once(&g_lagrange_once, lagrange_init);
+        r->quality = VP_RESAMPLE_HARDWARE;
+        hardware_reset(r);
+        return r;
+    }
 #ifdef VP_HAVE_SINC
     if (r && quality == VP_RESAMPLE_SINC) {
         r->sinc = vp_sinc_new(channels);
@@ -289,11 +386,20 @@ VpResampler *vp_resample_new(vp_resample_cb cb, int quality, int channels, void 
 
 long vp_resample_read(VpResampler *r, double ratio, long frames, float *data)
 {
+    return vp_resample_read_steps(r, NULL, ratio, frames, data);
+}
+
+long vp_resample_read_steps(VpResampler *r, const uint32_t *steps, double ratio, long frames,
+                            float *data)
+{
     if (!r || !r->cb || !data || frames <= 0) {
         return 0;
     }
     if (!(ratio > 0.0) || !isfinite(ratio)) {
         ratio = 1.0;
+    }
+    if (r->quality == VP_RESAMPLE_HARDWARE) {
+        return hardware_read(r, steps, ratio, frames, data);
     }
 #ifdef VP_HAVE_SINC
     if (r->sinc) {
@@ -305,6 +411,11 @@ long vp_resample_read(VpResampler *r, double ratio, long frames, float *data)
 
 double vp_resample_ahead(const VpResampler *r)
 {
+    if (r->quality == VP_RESAMPLE_HARDWARE) {
+        /* Count the current frame, four future frames and unread input,
+         * minus the cursor's offset from interp[3]. */
+        return (r->hw_len - r->hw_pos) + 5.0 - r->interp_pos / 65536.0;
+    }
 #ifdef VP_HAVE_SINC
     if (r->sinc) {
         return vp_sinc_ahead(r->sinc);
@@ -313,9 +424,12 @@ double vp_resample_ahead(const VpResampler *r)
     return r->input_len - r->input_pos;
 }
 
-/* linear reads the frame at its position and the next */
+/* The hardware window reaches three frames behind interp[3]. */
 double vp_resample_reach(const VpResampler *r)
 {
+    if (r->quality == VP_RESAMPLE_HARDWARE) {
+        return 3.0 + (r->interp_pos & 0xFFFF) / 65536.0;
+    }
 #ifdef VP_HAVE_SINC
     if (r->sinc) {
         return vp_sinc_reach(r->sinc);
@@ -336,6 +450,9 @@ void vp_resample_reset(VpResampler *r)
 #endif
     r->input_len = 0;
     r->input_pos = 0.0f;
+    if (r->quality == VP_RESAMPLE_HARDWARE) {
+        hardware_reset(r);
+    }
 }
 
 VpResampler *vp_resample_delete(VpResampler *r)

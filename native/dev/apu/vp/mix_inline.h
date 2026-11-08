@@ -41,7 +41,28 @@ static inline void mix_one_bin_scalar(float *dst, const float *src, float g) {
     }
 }
 
+/* Mix a route with a separate gain for each sample. */
+static inline void mix_one_bin_ramp_scalar(float *dst, const float *src, const float *g) {
+    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
+        dst[i] += g[i] * src[i];
+    }
+}
+
 #if defined(__x86_64__)
+static inline void mix_one_bin_ramp_sse2(float *dst, const float *src, const float *g) {
+    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i += 4) {
+        const __m128 d = _mm_loadu_ps(dst + i);
+        _mm_storeu_ps(dst + i, _mm_add_ps(d, _mm_mul_ps(_mm_loadu_ps(g + i), _mm_loadu_ps(src + i))));
+    }
+}
+
+static inline VP_AVX2 void mix_one_bin_ramp_avx2(float *dst, const float *src, const float *g) {
+    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i += 8) {
+        const __m256 d = _mm256_loadu_ps(dst + i);
+        _mm256_storeu_ps(dst + i, _mm256_fmadd_ps(_mm256_loadu_ps(g + i), _mm256_loadu_ps(src + i), d));
+    }
+}
+
 /* SSE2: the scalar's multiply, then add (bit for bit) */
 static inline void mix_one_bin_sse2(float *dst, const float *src, float g) {
     const __m128 gv = _mm_set1_ps(g);
@@ -83,6 +104,25 @@ static inline void mix_one_bin(float *dst, const float *src, float g) {
     }
 #else
     mix_one_bin_scalar(dst, src, g);
+#endif
+}
+
+static inline void mix_one_bin_ramp(float *dst, const float *src, const float *g) {
+#if defined(__aarch64__)
+    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i += 4) {
+        vst1q_f32(dst + i, vfmaq_f32(vld1q_f32(dst + i), vld1q_f32(g + i), vld1q_f32(src + i)));
+    }
+#elif defined(__x86_64__)
+    const int level = vp_simd_level();
+    if (level == VP_SIMD_AVX2) {
+        mix_one_bin_ramp_avx2(dst, src, g);
+    } else if (level == VP_SIMD_SSE2) {
+        mix_one_bin_ramp_sse2(dst, src, g);
+    } else {
+        mix_one_bin_ramp_scalar(dst, src, g);
+    }
+#else
+    mix_one_bin_ramp_scalar(dst, src, g);
 #endif
 }
 

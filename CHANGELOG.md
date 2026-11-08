@@ -11,6 +11,46 @@
   `tools/mods/xbe-to-cht.py` converts IPS and BPS patches (with Floating IPS)
   or a patched XBE.
 
+## linux-v0.21.0 (Linux, aarch64 and x86-64)
+
+This release brings the measured Xbox voice processor behavior from xemu
+to hakuX-lr, improves video overlays and NV2A rendering, and makes the
+x86-64 core load on Ubuntu 22.04.
+
+### What's new
+
+- **More accurate Xbox audio** — Port raddad772's work from
+  [xemu #3105](https://github.com/xemu-project/xemu/pull/3105). HRTF routing,
+  filters, attenuation, envelopes, LFOs and multipass mixing follow retail
+  Xbox measurements. The hardware resampler is now the default. Sinc and
+  linear remain selectable under **Audio Resampler**. In the
+  [retail console probe comparison](https://github.com/portare-ch/hakuX-lr/pull/166#issuecomment-6712645972),
+  exact matches rose from 237 to 587 of 770 rows. Envelope and LFO timing
+  still differ in some cases.
+- **NV2A rendering** — Add solid, wireframe and point fill modes for front
+  and back faces, with line and polygon smoothing where Vulkan supports
+  them. **Combiner Precision** offers optional 9-bit stage rounding.
+  Accurate is the default on x86-64 Linux and Fast on ARM64.
+- **Ubuntu 22.04 on x86-64** — Lower the core's glibc and libstdc++ runtime
+  requirements. KVM still needs Linux 5.16 or newer, so Ubuntu 22.04 users
+  on the original 5.15 kernel need an HWE or newer kernel.
+- **ISO to CHD tool** — Use `python3 tools/iso_to_chd.py Game.iso` to repack
+  a Redump ISO as XISO before DVD CHD compression. This requires
+  `xdvdfs` and `chdman` and preserves the input file.
+
+### Fixes
+
+- Scale and crop PVIDEO overlays correctly and apply their color keys
+  against the original framebuffer. This fixes clipped video in titles
+  including SpyHunter: Nowhere to Run, Jedi Academy and Worms 4: Mayhem.
+- Preserve voice page addresses when games write output-buffer SGEs and
+  handle unusual multipass layouts without asserting.
+- Restore voice modulation, ramps and filter history when loading internal
+  APU state.
+
+Original fork code marked `GPL-2.0-or-later` is available under those terms.
+The combined core is distributed under `GPL-3.0-or-later`.
+
 ## linux-v0.20.0 (Linux, aarch64 and x86-64, and Android)
 
 ### What's new

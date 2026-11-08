@@ -17,8 +17,8 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 /* hakuX native core: the same filter (31-tap HRIR convolution per channel,
- * an interaural delay with linear interpolation, parameters smoothed per
- * sample), laid out for NEON (and SSE2, AVX2 + FMA on x86-64). The delay line holds its samples twice, so
+ * an interaural delay with linear interpolation, parameters moved across
+ * each frame), laid out for NEON (and SSE2, AVX2 + FMA on x86-64). The delay line holds its samples twice, so
  * any delay's window is contiguous; the coefficients are stored reversed
  * and padded to 32 with a zero tap, so the convolution is a dot product of
  * two contiguous arrays. Its sums are associated differently from the
@@ -45,7 +45,6 @@
 #define HRTF_TAPS_PADDED        32
 #define HRTF_MAX_DELAY_SAMPLES  42
 #define HRTF_BUFLEN             (HRTF_NUM_TAPS + HRTF_MAX_DELAY_SAMPLES)
-#define HRTF_PARAM_SMOOTH_ALPHA 0.01f
 
 typedef struct {
     int buf_pos;
@@ -59,6 +58,7 @@ typedef struct {
     } ch[2];
     float itd_cur;
     float itd_tar;
+    bool params_set;            /* false: the next frame starts at the target */
 } HrtfFilter;
 
 static inline void hrtf_filter_init(HrtfFilter *f)
@@ -85,27 +85,24 @@ hrtf_filter_set_target_params(HrtfFilter *f, float hrir_coeff[2][HRTF_NUM_TAPS],
     f->itd_tar =
         fmaxf(-HRTF_MAX_DELAY_SAMPLES, fminf(itd, HRTF_MAX_DELAY_SAMPLES));
 
+    /* Taps apply as written: hardware does not normalize them. */
     for (int ch = 0; ch < 2; ch++) {
         const float *coeff = hrir_coeff[ch];
-
-        // Normalize coefficients for unity filter gain (each channel's own)
-        float s = 0.0f;
-        for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-            s += fabsf(coeff[k]);
-        }
-        const bool norm = !(s == 0.0f || s == 1.0f);
         float *tar = f->ch[ch].hrir_coeff_tar;
         for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-            tar[HRTF_NUM_TAPS - 1 - k] = norm ? coeff[k] / s : coeff[k];
+            tar[HRTF_NUM_TAPS - 1 - k] = coeff[k];
         }
         tar[HRTF_NUM_TAPS] = 0.0f;
     }
 }
 
-static inline float hrtf_filter_smooth_param(float cur, float tar)
+static inline void hrtf_filter_settle_parameters(HrtfFilter *f)
 {
-    // FIXME: Match hardware parameter transition
-    return cur + HRTF_PARAM_SMOOTH_ALPHA * (tar - cur);
+    for (int ch = 0; ch < 2; ch++) {
+        memcpy(f->ch[ch].hrir_coeff_cur, f->ch[ch].hrir_coeff_tar,
+               sizeof(f->ch[ch].hrir_coeff_cur));
+    }
+    f->itd_cur = f->itd_tar;
 }
 
 /* The parameters at their targets: a step leaves them as they are. */
@@ -127,18 +124,17 @@ static inline bool hrtf_filter_settled(const HrtfFilter *f)
 #if defined(__x86_64__)
 /* hrtf_dot's NEON sums in SSE2: its lanes and their order, each fused
  * multiply-add a multiply and an add */
-static inline float hrtf_dot_sse2(float *c, const float *tar, const float *w, float dfrac)
+static inline float hrtf_dot_sse2(const float *c, const float *tar, float wgt, const float *w,
+                                  float dfrac)
 {
     const bool interp = dfrac > 0.0f;
-    const __m128 alpha = _mm_set1_ps(HRTF_PARAM_SMOOTH_ALPHA), vf = _mm_set1_ps(dfrac), v0 = _mm_set1_ps(1 - dfrac);
+    const __m128 wv = _mm_set1_ps(wgt), vf = _mm_set1_ps(dfrac), v0 = _mm_set1_ps(1 - dfrac);
     __m128 a0 = _mm_setzero_ps(), a1 = a0;
     for (int m = 0; m < HRTF_TAPS_PADDED; m += 8) {
         __m128 c0 = _mm_loadu_ps(c + m), c1 = _mm_loadu_ps(c + m + 4);
         if (tar) {
-            c0 = _mm_add_ps(c0, _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(tar + m), c0), alpha));
-            c1 = _mm_add_ps(c1, _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(tar + m + 4), c1), alpha));
-            _mm_storeu_ps(c + m, c0);
-            _mm_storeu_ps(c + m + 4, c1);
+            c0 = _mm_add_ps(c0, _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(tar + m), c0), wv));
+            c1 = _mm_add_ps(c1, _mm_mul_ps(_mm_sub_ps(_mm_loadu_ps(tar + m + 4), c1), wv));
         }
         __m128 s0 = _mm_loadu_ps(w + m), s1 = _mm_loadu_ps(w + m + 4);
         if (interp) {
@@ -153,17 +149,16 @@ static inline float hrtf_dot_sse2(float *c, const float *tar, const float *w, fl
 
 /* hrtf_dot's NEON sums in AVX2 + FMA, bit for bit: lanes 0-3 its a0, 4-7 a1 */
 static inline __attribute__((always_inline)) VP_AVX2 float
-hrtf_dot_avx2(float *c, const float *tar, const float *w, float dfrac)
+hrtf_dot_avx2(const float *c, const float *tar, float wgt, const float *w, float dfrac)
 {
     const bool interp = dfrac > 0.0f;
-    const __m256 alpha = _mm256_set1_ps(HRTF_PARAM_SMOOTH_ALPHA), vf = _mm256_set1_ps(dfrac);
+    const __m256 wv = _mm256_set1_ps(wgt), vf = _mm256_set1_ps(dfrac);
     const __m256 v0 = _mm256_set1_ps(1 - dfrac);
     __m256 a = _mm256_setzero_ps();
     for (int m = 0; m < HRTF_TAPS_PADDED; m += 8) {
         __m256 cv = _mm256_loadu_ps(c + m);
         if (tar) {
-            cv = _mm256_fmadd_ps(_mm256_sub_ps(_mm256_loadu_ps(tar + m), cv), alpha, cv);
-            _mm256_storeu_ps(c + m, cv);
+            cv = _mm256_fmadd_ps(_mm256_sub_ps(_mm256_loadu_ps(tar + m), cv), wv, cv);
         }
         __m256 sv = _mm256_loadu_ps(w + m);
         if (interp) {
@@ -176,10 +171,11 @@ hrtf_dot_avx2(float *c, const float *tar, const float *w, float dfrac)
 #endif
 
 /* sum of c[m] * w[m] over the padded taps. With tar, each c[m] is first
- * smoothed one step toward tar[m] (the per-sample parameter step) and
- * stored; with dfrac, each w[m] is first interpolated toward w[m - 1] (the
+ * moved wgt of the way toward tar[m] (the parameters' move across the
+ * frame); with dfrac, each w[m] is first interpolated toward w[m - 1] (the
  * sample one further back). */
-static inline float hrtf_dot(float *c, const float *tar, const float *w, float dfrac)
+static inline float hrtf_dot(const float *c, const float *tar, float wgt, const float *w,
+                             float dfrac)
 {
     const bool interp = dfrac > 0.0f;
     const float w0 = 1 - dfrac;
@@ -188,10 +184,8 @@ static inline float hrtf_dot(float *c, const float *tar, const float *w, float d
     for (int m = 0; m < HRTF_TAPS_PADDED; m += 8) {
         float32x4_t c0 = vld1q_f32(c + m), c1 = vld1q_f32(c + m + 4);
         if (tar) {
-            c0 = vfmaq_n_f32(c0, vsubq_f32(vld1q_f32(tar + m), c0), HRTF_PARAM_SMOOTH_ALPHA);
-            c1 = vfmaq_n_f32(c1, vsubq_f32(vld1q_f32(tar + m + 4), c1), HRTF_PARAM_SMOOTH_ALPHA);
-            vst1q_f32(c + m, c0);
-            vst1q_f32(c + m + 4, c1);
+            c0 = vfmaq_n_f32(c0, vsubq_f32(vld1q_f32(tar + m), c0), wgt);
+            c1 = vfmaq_n_f32(c1, vsubq_f32(vld1q_f32(tar + m + 4), c1), wgt);
         }
         float32x4_t s0 = vld1q_f32(w + m), s1 = vld1q_f32(w + m + 4);
         if (interp) {
@@ -205,31 +199,38 @@ static inline float hrtf_dot(float *c, const float *tar, const float *w, float d
 #else
     float acc = 0.0f;
     for (int m = 0; m < HRTF_TAPS_PADDED; m++) {
+        float cm = c[m];
         if (tar) {
-            c[m] = hrtf_filter_smooth_param(c[m], tar[m]);
+            cm = cm + (tar[m] - cm) * wgt;
         }
         float s = w[m];
         if (interp) {
             s = s * w0 + w[m - 1] * dfrac;
         }
-        acc += c[m] * s;
+        acc += cm * s;
     }
     return acc;
 #endif
 }
 
-typedef float (*HrtfDot)(float *c, const float *tar, const float *w, float dfrac);
+typedef float (*HrtfDot)(const float *c, const float *tar, float wgt, const float *w,
+                         float dfrac);
 
+/* Ramp taps and delay over one frame. New voices start at the target. */
 static inline __attribute__((always_inline)) void
 hrtf_filter_run(HrtfFilter *f, float in[HRTF_SAMPLES_PER_FRAME][2], float out[HRTF_SAMPLES_PER_FRAME][2],
                 HrtfDot dot)
 {
-    /* the parameters step once per sample (the coefficients in hrtf_dot) */
+    if (!f->params_set) {
+        hrtf_filter_settle_parameters(f);
+        f->params_set = true;
+    }
     const bool settled = hrtf_filter_settled(f);
     for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
-        if (!settled) {
-            f->itd_cur = hrtf_filter_smooth_param(f->itd_cur, f->itd_tar);
-        }
+        const float wgt = n / (float)HRTF_SAMPLES_PER_FRAME;
+        /* Keep the operations separate so the delay rounds alike on all CPUs. */
+        const float move = settled ? 0.0f : (f->itd_tar - f->itd_cur) * wgt;
+        const float itd = f->itd_cur + move;
         const int pos = f->buf_pos;
 
         for (int ch = 0; ch < 2; ch++) {
@@ -240,7 +241,7 @@ hrtf_filter_run(HrtfFilter *f, float in[HRTF_SAMPLES_PER_FRAME][2], float out[HR
             buf[pos + HRTF_BUFLEN] = in[n][ch];
 
             // Interaural time difference (channel delay)
-            float d = f->itd_cur * (ch == 0 ? +1.0f : -1.0f);
+            float d = itd * (ch == 0 ? +1.0f : -1.0f);
             if (d < 0.0f) {
                 d = 0.0f;
             }
@@ -250,11 +251,13 @@ hrtf_filter_run(HrtfFilter *f, float in[HRTF_SAMPLES_PER_FRAME][2], float out[HR
             // HRIR Convolution: tap k reads the sample di + k back,
             // buf[pos + HRTF_BUFLEN - di - k]; reversed, from tap 30 up
             const float *w = &buf[pos + HRTF_BUFLEN - di - (HRTF_NUM_TAPS - 1)];
-            out[n][ch] = dot(f->ch[ch].hrir_coeff_cur, settled ? NULL : f->ch[ch].hrir_coeff_tar, w, dfrac);
+            out[n][ch] = dot(f->ch[ch].hrir_coeff_cur, settled ? NULL : f->ch[ch].hrir_coeff_tar, wgt,
+                             w, dfrac);
         }
 
         f->buf_pos = (pos + 1) % HRTF_BUFLEN;
     }
+    hrtf_filter_settle_parameters(f);
 }
 
 #if defined(__x86_64__)

@@ -35,7 +35,7 @@ enum {
     RS_FOGDENSITY = 96, RS_SPECULARENABLE = 103, RS_POINTSPRITEENABLE = 118,
     RS_FOGCOLOR = 138, RS_FILLMODE = 139, RS_BACKFILLMODE = 140, RS_TWOSIDEDLIGHTING = 141,
     RS_ZENABLE = 143, RS_STENCILENABLE = 144, RS_STENCILFAIL = 145,
-    RS_FRONTFACE = 146, RS_CULLMODE = 147, RS_EDGEANTIALIAS = 151, RS_SHADOWFUNC = 156,
+    RS_FRONTFACE = 146, RS_CULLMODE = 147, RS_LOGICOP = 150, RS_EDGEANTIALIAS = 151, RS_SHADOWFUNC = 156,
     RS_LINEWIDTH = 157,
 };
 enum {
@@ -133,6 +133,14 @@ void hle_kelvin_method(uint32_t m, uint32_t v)
     }
     if (__builtin_expect(!g_state_read_ready, 0)) {
         state_read_init();
+    }
+    /* Invalid logic-op writes leave the previous state intact (envytools hwtest). */
+    if ((m == 0x17C0 && (v < 0x1500 || v > 0x150F)) || (m == 0x17BC && v > 1)) {
+        static unsigned s_logged;
+        if (s_logged++ < 4) {
+            hle_log("hakuX-hle-pb", "%s 0x%x refused", m == 0x17C0 ? "SET_LOGIC_OP" : "SET_LOGIC_OP_ENABLE", v);
+        }
+        return;
     }
     if (m == 0x0380 && v >= 0x200) {
         /* SET_LINE_WIDTH past its 6.3 bits: the NV2A refuses the method (a
@@ -234,6 +242,8 @@ void hle_kelvin_state(HleCmdState *st)
             rs[k_rs_map[i].rs] = R(k_rs_map[i].m);
         }
     }
+    /* D3DRS_LOGICOP holds the active GL op, or zero when disabled. */
+    rs[RS_LOGICOP] = R(0x17BC) ? R(0x17C0) : 0;
     st->aactl = W(0x1D7C) ? R(0x1D7C) : 0xFFFF0001u;   /* SET_ANTI_ALIASING_CONTROL */
     static const float k_eye[3] = { 0.0f, 0.0f, -1.0f };
     for (unsigned i = 0; i < 3; i++) {  /* SET_EYE_VECTOR (envytools' TEX_SHADER_CONST_EYE) */

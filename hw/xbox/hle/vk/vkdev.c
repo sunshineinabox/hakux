@@ -635,6 +635,7 @@ static int vk_init(PFN_vkGetInstanceProcAddr gipa_shared, VkInstance inst_shared
     c->wide_lines = q.features.wideLines;
     c->max_line_width = c->wide_lines ? v->props.limits.lineWidthRange[1] : 1.0f;
     c->fill_modes = q.features.fillModeNonSolid;
+    c->logic_op = q.features.logicOp;
     c->smooth_lines = e_lrast && q_lrast.smoothLines;
     c->bary = e_bary && q_bary.fragmentShaderBarycentric;
     need(c, q.features.largePoints, "largePoints");

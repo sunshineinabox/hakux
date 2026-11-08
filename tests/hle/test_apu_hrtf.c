@@ -1,9 +1,5 @@
-/* The native core's HRTF filter (native/dev/apu/vp/hrtf.h) against xemu's
- * scalar one (the reference below, as it was): the same output within float
- * rounding, over random audio with the parameters moving (new targets every
- * few frames, delays from 0 to the 42-sample limit, fractional and whole)
- * and settled. Built for the host and, with the NDK, for the device (its
- * NEON path); on x86-64 at each vector level the host has. */
+/* Compare the native HRTF filter with xemu #3105's scalar reference for
+ * steady and changing targets, with delays up to 42 samples. */
 #include "hle_test.h"
 
 #include <math.h>
@@ -23,46 +19,42 @@ typedef struct {
     } ch[2];
     float itd_cur;
     float itd_tar;
+    bool params_set;
 } RefFilter;
 
 static void ref_set_target_params(RefFilter *f, float hrir_coeff[2][HRTF_NUM_TAPS], float itd)
 {
     f->itd_tar = fmaxf(-HRTF_MAX_DELAY_SAMPLES, fminf(itd, HRTF_MAX_DELAY_SAMPLES));
-    for (int ch = 0; ch < 2; ch++) {
-        float *coeff = f->ch[ch].hrir_coeff_tar;
-        memcpy(coeff, hrir_coeff[ch], sizeof(f->ch[ch].hrir_coeff_tar));
-        float s = 0.0f;
-        for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-            s += fabsf(coeff[k]);
-        }
-        if (s == 0.0f || s == 1.0f) {
-            break;
-        }
-        for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-            coeff[k] /= s;
-        }
+    for (int ch = 0; ch < 2; ch++) {    /* taps as written (xemu #3105) */
+        memcpy(f->ch[ch].hrir_coeff_tar, hrir_coeff[ch], sizeof(f->ch[ch].hrir_coeff_tar));
     }
 }
 
-static float ref_smooth(float cur, float tar)
+static void ref_settle(RefFilter *f)
 {
-    return cur + HRTF_PARAM_SMOOTH_ALPHA * (tar - cur);
+    for (int ch = 0; ch < 2; ch++) {
+        memcpy(f->ch[ch].hrir_coeff_cur, f->ch[ch].hrir_coeff_tar, sizeof(f->ch[ch].hrir_coeff_cur));
+    }
+    f->itd_cur = f->itd_tar;
 }
 
 static void ref_process(RefFilter *f, float in[HRTF_SAMPLES_PER_FRAME][2], float out[HRTF_SAMPLES_PER_FRAME][2])
 {
+    if (!f->params_set) {
+        ref_settle(f);
+        f->params_set = true;
+    }
     for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
-        for (int ch = 0; ch < 2; ch++) {
-            for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-                f->ch[ch].hrir_coeff_cur[k] = ref_smooth(f->ch[ch].hrir_coeff_cur[k], f->ch[ch].hrir_coeff_tar[k]);
-            }
-        }
-        f->itd_cur = ref_smooth(f->itd_cur, f->itd_tar);
+        float w = n / (float)HRTF_SAMPLES_PER_FRAME;
         for (int ch = 0; ch < 2; ch++) {
             float *buf = f->ch[ch].buf;
-            float *coeff = f->ch[ch].hrir_coeff_cur;
+            float *coeff_cur = f->ch[ch].hrir_coeff_cur;
+            float *coeff_tar = f->ch[ch].hrir_coeff_tar;
             buf[f->buf_pos] = in[n][ch];
-            float d = f->itd_cur * (ch == 0 ? +1.0f : -1.0f);
+            /* Match the core's rounding by preventing FMA contraction. */
+            float move = (f->itd_tar - f->itd_cur) * w;
+            float itd = f->itd_cur + move;
+            float d = itd * (ch == 0 ? +1.0f : -1.0f);
             if (d < 0.0f) {
                 d = 0.0f;
             }
@@ -76,12 +68,13 @@ static void ref_process(RefFilter *f, float in[HRTF_SAMPLES_PER_FRAME][2], float
                     int idx2 = (idx1 - 1 + REF_BUFLEN) % REF_BUFLEN;
                     s = s * (1 - dfrac) + buf[idx2] * dfrac;
                 }
-                acc += coeff[k] * s;
+                acc += (coeff_cur[k] + (coeff_tar[k] - coeff_cur[k]) * w) * s;
             }
             out[n][ch] = acc;
         }
         f->buf_pos = (f->buf_pos + 1) % REF_BUFLEN;
     }
+    ref_settle(f);
 }
 
 /* ---- the run */
@@ -129,7 +122,9 @@ static void run(int frames, int retarget_every, const float *itds, int n_itds, b
         hrtf_filter_process(&f, b, b);      /* in place, as the VP calls it */
         for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
             for (int ch = 0; ch < 2; ch++) {
-                const double e = fabs((double)a[n][ch] - (double)b[n][ch]);
+                /* relative to the output (up to ~10: taps reach their
+                 * targets within a frame, the sums' order differs) */
+                const double e = fabs((double)a[n][ch] - (double)b[n][ch]) / fmax(1.0, fabs(a[n][ch]));
                 if (e > g_max_err) {
                     g_max_err = e;
                 }
@@ -259,8 +254,7 @@ static void test_history_every_position(void)
     HT_EQ_INT(seen, HRTF_BUFLEN);
 }
 
-/* Clearing the history of a voice whose parameters are still moving leaves
- * them moving where they were */
+/* Clearing history preserves a pending parameter ramp. */
 static void test_history_keeps_moving_parameters(void)
 {
     static HrtfFilter f, before;
@@ -271,6 +265,9 @@ static void test_history_keeps_moving_parameters(void)
     float in[HRTF_SAMPLES_PER_FRAME][2], out[HRTF_SAMPLES_PER_FRAME][2];
     random_frame(in);
     hrtf_filter_process(&f, in, out);
+    HT_CHECK(hrtf_filter_settled(&f));      /* a frame ends at the target */
+    random_hrir(h);
+    hrtf_filter_set_target_params(&f, h, 9.5f);
     HT_CHECK(!hrtf_filter_settled(&f));
     before = f;
     hrtf_filter_clear_history(&f);
@@ -307,11 +304,7 @@ static void test_retarget_keeps_history(void)
     HT_CHECK(nonzero > 0);
 }
 
-/* Each ear's own coefficients, normalized by their own absolute sum (left
- * as they are when it is 0 or 1), and its own delay: an impulse through a
- * settled filter against values worked out by hand, not against the
- * reference above (whose normalization stops at the first ear with a sum of
- * 0 or 1 and leaves the other ear's coefficients unset). */
+/* Check each ear's unnormalized taps and delay against an impulse response. */
 static void impulse_response(const float h[2][HRTF_NUM_TAPS], float itd, float y[2][HRTF_SAMPLES_PER_FRAME])
 {
     static HrtfFilter f;
@@ -339,28 +332,27 @@ static void expect(const float y[HRTF_SAMPLES_PER_FRAME], const float want[HRTF_
 static void test_coefficients_by_ear(void)
 {
     float h[2][HRTF_NUM_TAPS], y[2][HRTF_SAMPLES_PER_FRAME], w0[HRTF_SAMPLES_PER_FRAME], w1[HRTF_SAMPLES_PER_FRAME];
-    /* asymmetric: 2 at tap 0 (sum 2: 1), 0.25 at taps 1 and 2 (sum 0.5: 0.5 each) */
+    /* asymmetric: 2 at tap 0, 0.25 at taps 1 and 2 */
     memset(h, 0, sizeof(h));
     h[0][0] = 2.0f;
     h[1][1] = h[1][2] = 0.25f;
     impulse_response(h, 0.0f, y);
     memset(w0, 0, sizeof(w0));
     memset(w1, 0, sizeof(w1));
-    w0[0] = 1.0f;
-    w1[1] = w1[2] = 0.5f;
+    w0[0] = 2.0f;
+    w1[1] = w1[2] = 0.25f;
     expect(y[0], w0);
     expect(y[1], w1);
-    /* the first ear's sum 0: silent; the second still normalized (3 at tap 3: 1) */
+    /* the first ear silent; the second 3 at tap 3 */
     memset(h, 0, sizeof(h));
     h[1][3] = 3.0f;
     impulse_response(h, 0.0f, y);
     memset(w0, 0, sizeof(w0));
     memset(w1, 0, sizeof(w1));
-    w1[3] = 1.0f;
+    w1[3] = 3.0f;
     expect(y[0], w0);
     expect(y[1], w1);
-    /* the first ear's sum 1: as it is (0.5 at tap 0, -0.5 at tap 4); the
-     * second normalized (4 at tap 2: 1) */
+    /* 0.5 at tap 0 and -0.5 at tap 4; 4 at tap 2 */
     memset(h, 0, sizeof(h));
     h[0][0] = 0.5f;
     h[0][4] = -0.5f;
@@ -370,7 +362,7 @@ static void test_coefficients_by_ear(void)
     memset(w1, 0, sizeof(w1));
     w0[0] = 0.5f;
     w0[4] = -0.5f;
-    w1[2] = 1.0f;
+    w1[2] = 4.0f;
     expect(y[0], w0);
     expect(y[1], w1);
     /* a delay of +3 holds the first ear back 3 samples, not the second */
@@ -386,6 +378,36 @@ static void test_coefficients_by_ear(void)
     expect(y[1], w1);
 }
 
+/* A voice's first frame starts at its target; a new target is reached
+ * across exactly one frame, linearly (measured on hardware) */
+static void test_move_across_one_frame(void)
+{
+    static HrtfFilter f;
+    hrtf_filter_init(&f);
+    float h[2][HRTF_NUM_TAPS] = {{0}};
+    h[0][0] = h[1][0] = 1.0f;
+    hrtf_filter_set_target_params(&f, h, 0.0f);
+    float dc[HRTF_SAMPLES_PER_FRAME][2], out[HRTF_SAMPLES_PER_FRAME][2];
+    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
+        dc[n][0] = dc[n][1] = 1.0f;
+    }
+    hrtf_filter_process(&f, dc, out);
+    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
+        HT_CHECK(out[n][0] == 1.0f && out[n][1] == 1.0f);
+    }
+    h[0][0] = h[1][0] = 0.5f;
+    hrtf_filter_set_target_params(&f, h, 0.0f);
+    hrtf_filter_process(&f, dc, out);
+    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
+        const float want = 1.0f - 0.5f * n / HRTF_SAMPLES_PER_FRAME;
+        HT_CHECK(fabsf(out[n][0] - want) < 1e-6f && fabsf(out[n][1] - want) < 1e-6f);
+    }
+    hrtf_filter_process(&f, dc, out);
+    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
+        HT_CHECK(out[n][0] == 0.5f && out[n][1] == 0.5f);
+    }
+}
+
 static void run_suite(void)
 {
     g_max_err = 0;
@@ -394,6 +416,7 @@ static void run_suite(void)
     HT_RUN(test_history_keeps_moving_parameters);
     HT_RUN(test_retarget_keeps_history);
     HT_RUN(test_coefficients_by_ear);
+    HT_RUN(test_move_across_one_frame);
     const float moving[] = {0.0f, 7.25f, -13.5f, 42.0f, -42.0f, 41.9f, -0.3f, 30.0f, 100.0f, -100.0f};
     const float whole[] = {0.0f, 5.0f, -12.0f, 42.0f, -42.0f};
     run(400, 3, moving, 10, false);         /* parameters always moving */
@@ -401,7 +424,7 @@ static void run_suite(void)
     run(3000, 1, whole, 5, true);           /* one target: settles (the fast path) */
     run(3000, 1, moving + 1, 1, true);      /* settles on a fractional delay */
     run(3000, 1, moving + 5, 1, true);      /* ... next to the delay limit */
-    fprintf(stderr, "hrtf: max |difference| %.3g\n", g_max_err);
+    fprintf(stderr, "hrtf: max relative difference %.3g\n", g_max_err);
     HT_CHECK(g_max_err < 2e-6);
 }
 

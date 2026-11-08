@@ -41,6 +41,34 @@ static bool channels_equal(void)
 
 #define HALF 16384              /* 0.5 */
 
+/* Drop the named final APU field to simulate an older state. Return the
+ * new length, or zero if that field cannot be removed. */
+static size_t cut_last_field(NcBuf *b, size_t len, const char *name)
+{
+    const size_t nl = strlen(name);
+    size_t count = 0, field = 0;
+    for (size_t at = 0; at + 11 <= len; at++) {
+        if (b->p[at + 4] == 6 && !memcmp(b->p + at + 5, "gp.dsp", 6)) {
+            count = at;
+            break;
+        }
+    }
+    for (size_t at = len - nl - 1; at > count; at--) {
+        if (b->p[at] == nl && !memcmp(b->p + at + 1, name, nl)) {
+            field = at;
+            break;
+        }
+    }
+    uint32_t n;
+    memcpy(&n, b->p + count, 4);
+    if (!field || n < 2) {
+        return 0;
+    }
+    n--;
+    memcpy(b->p + count, &n, 4);
+    return field;
+}
+
 static void test_2d_mono_panned(void)
 {
     apu_up(false, true, 1);
@@ -168,15 +196,15 @@ static void test_2d_route_kept(void)
     start(&v);
     frames(4);
     bool ok = all(0, pcm(0.5f), 1) && all(1, 0, 0);
-    v.vol[0] = 0xFFE;           /* -64 dB */
+    v.vol[0] = 0x900;           /* -36 dB */
     volumes(&v);
     frames(2);
-    ok = ok && all(0, pcm(0.5f * attenuation(0xFFE)), 1) && all(1, 0, 0);
-    v.vol[0] = 0xFFF;           /* muted */
+    ok = ok && all(0, pcm(0.5f * attenuation(0x900)), 1) && all(1, 0, 0);
+    v.vol[0] = 0xFFE;           /* past 63 dB: nothing (measured), as muted */
     volumes(&v);
     frames(2);
     ok = ok && all(0, 0, 0) && all(1, 0, 0);
-    check(ok, "2D dry send fading to mute beside a reverb send: the left at 0.5, 0.0003, then 0, the right 0");
+    check(ok, "2D dry send fading to mute beside a reverb send: the left at 0.5, 0.008, then 0, the right 0");
     apu_down();
 
     apu_up(false, true, 1);
@@ -248,27 +276,49 @@ static void test_2d_route_saved(void)
     check(!b.fail && before && loaded && kept && all(0, 0, 0) && all(1, 0, 0),
           "2D voice's route across a savestate: faded to mute beside a reverb send, silent before and after");
 
-    /* the state without vp.route, its last field: the field count one less
-     * (the "mcpx-apu" table's, before its first field, gp.dsp) and the
-     * field's bytes (name, kind, size, count, 256 routes) cut off */
-    const size_t field = 1 + strlen("vp.route") + 1 + 4 + 4 + sizeof(d->vp.route);
-    bool cut = false;
-    for (size_t at = 0; at + 11 <= b.len && !cut; at++) {
-        uint32_t n;
-        memcpy(&n, b.p + at, 4);
-        if (b.p[at + 4] == 6 && !memcmp(b.p + at + 5, "gp.dsp", 6) && n > 1) {
-            n--;
-            memcpy(b.p + at, &n, 4);
-            cut = !memcmp(b.p + b.len - field + 1, "vp.route", 8);
-        }
-    }
-    NcRd old = {b.p, b.len - field, 0, false};
-    const bool old_loaded = cut && nc_apu_state_load(&old, NC_STATE_V_APU);
+    /* Simulate a state saved before vp.route and vp.filters. */
+    size_t len = cut_last_field(&b, b.len, "vp.filters");
+    len = len ? cut_last_field(&b, len, "vp.route") : 0;
+    NcRd old = {b.p, len, 0, false};
+    const bool old_loaded = len && nc_apu_state_load(&old, NC_STATE_V_APU);
     bool undecided = true;
     for (int k = 0; k < MCPX_HW_MAX_VOICES; k++) {
         undecided &= d->vp.route[k] == VP_ROUTE_UNDECIDED;
     }
     check(old_loaded && undecided, "a state without the routes (an older one): loads, every voice undecided");
+    nc_buf_free(&b);
+    apu_down();
+}
+
+/* Check sample-for-sample LFO restoration and VOICE_ON defaults for old states. */
+static void test_lfo_saved(void)
+{
+    apu_up(false, false, 1);
+    pcm_page(0, false, HALF, 0);
+    Voice v = voice(108, NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_2D_TOP, false, 0);
+    v.vol[0] = 0;               /* front left, 0 dB */
+    start(&v);
+    pio(NV1BA0_PIO_SET_CURRENT_VOICE, v.handle);
+    pio(NV1BA0_PIO_SET_VOICE_LFO_ENV, 0x40u << 12);    /* LFO A: delta 40h */
+    pio(NV1BA0_PIO_SET_VOICE_LFO_MOD, 127);            /* amplitude +127 */
+    frames(5);
+    NcBuf b = {0};
+    nc_apu_state_save(&b);
+    static int16_t after_save[8 * NUM_SAMPLES_PER_FRAME][2], after_load[8 * NUM_SAMPLES_PER_FRAME][2];
+    frames_into(8, after_save);
+    NcRd r = {b.p, b.len, 0, false};
+    const bool loaded = nc_apu_state_load(&r, NC_STATE_V_APU);
+    frames_into(8, after_load);
+    const bool moving = after_save[0][0] != after_save[7 * NUM_SAMPLES_PER_FRAME][0];
+    check(!b.fail && loaded && moving && !memcmp(after_save, after_load, sizeof(after_save)),
+          "a voice's LFO across a savestate: the same frames after the load as after the save");
+
+    const size_t len = cut_last_field(&b, b.len, "vp.filters");
+    NcRd old = {b.p, len, 0, false};
+    const bool old_loaded = len && nc_apu_state_load(&old, NC_STATE_V_APU);
+    const MCPXAPUVoiceFilter *f = &d->vp.filters[v.handle];
+    check(old_loaded && !f->lfo_armed && !f->gains && !f->pitched,
+          "a state without the voices' state (an older one): loads, each voice as at its VOICE_ON");
     nc_buf_free(&b);
     apu_down();
 }
@@ -283,8 +333,9 @@ static void test_2d_route_saved(void)
  * the left ear the first two and the right ear the last two, the front
  * pair at 0 dB, the back pair at -3 dB, as the guest DSP image puts them on
  * a stereo console; the HRTF filter off, or on with an entry that passes
- * its input (tap 0 both ears); the HRTF headroom (before, the monitor's
- * mix: its loudest send's gain on both channels) */
+ * its input (tap 0 both ears, 7Fh: 31/32); without an entry its HRTF
+ * sends silent, and at their bins' headroom, not the HRTF headroom
+ * (measured on hardware: xemu #3105) */
 static void test_3d(void)
 {
     const float k = 0.70710678f;
@@ -293,15 +344,16 @@ static void test_3d(void)
         pcm_page(0, false, HALF, 0);
         pio(NV1BA0_PIO_SET_HRTF_SUBMIXES, DS_HRTF_SUBMIXES);
         pio(NV1BA0_PIO_SET_CURRENT_HRTF_ENTRY, 5);
-        pio(NV1BA0_PIO_SET_HRIR, 127 | 127 << 8);   /* taps 0: 127/128, normalized to 1 */
+        pio(NV1BA0_PIO_SET_HRIR, 0x7F | 0x7F << 8);     /* taps 0: 31/32 */
         Voice v = voice(7, NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_3D_TOP, false, 0);
         v.vol[0] = 0;               /* left ear to 3D front left, 0 dB */
         v.vol[2] = 0x300;           /* right ear to 3D front right, -12 dB */
         v.hrtf = 5;
         start(&v);
-        frames(hrtf ? 40 : 4);
-        check(all(0, pcm(0.5f), 1) && all(1, pcm(0.5f * attenuation(0x300)), 1),
-              hrtf ? "3D voice, HRTF on: its ears by its front sends, left 0.5, right -12 dB"
+        frames(4);
+        const float ear = hrtf ? 0.5f * TAP_7F : 0.5f;
+        check(all(0, pcm(ear), 1) && all(1, pcm(ear * attenuation(0x300)), 1),
+              hrtf ? "3D voice, HRTF on: its ears by its front sends, left 0.48, right -12 dB"
                    : "3D voice, HRTF off: its ears by its front sends, left 0.5, right -12 dB");
         apu_down();
     }
@@ -313,35 +365,55 @@ static void test_3d(void)
     pcm_page(0, false, HALF, 0);
     pio(NV1BA0_PIO_SET_HRTF_SUBMIXES, DS_HRTF_SUBMIXES);
     pio(NV1BA0_PIO_SET_CURRENT_HRTF_ENTRY, 5);
-    pio(NV1BA0_PIO_SET_HRIR, 127);              /* left tap 0 only */
+    pio(NV1BA0_PIO_SET_HRIR, 0x7F);             /* left tap 0 only */
     Voice v = voice(7, NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_3D_TOP, false, 0);
     v.vol[0] = v.vol[2] = 0;    /* the front pair, 0 dB */
     v.hrtf = 5;
     start(&v);
-    frames(40);
-    check(all(0, pcm(0.5f), 1) && all(1, 0, 0), "3D voice heard by the left ear only: left 0.5, right exactly 0");
+    frames(4);
+    check(all(0, pcm(0.5f * TAP_7F), 1) && all(1, 0, 0),
+          "3D voice heard by the left ear only: left 0.48, right exactly 0");
     apu_down();
 
     apu_up(false, true, 1);
     pcm_page(0, false, HALF, 0);
     pio(NV1BA0_PIO_SET_HRTF_SUBMIXES, DS_HRTF_SUBMIXES);
+    pio(NV1BA0_PIO_SET_CURRENT_HRTF_ENTRY, 5);
+    pio(NV1BA0_PIO_SET_HRIR, 0x7F | 0x7F << 8);
     v = voice(7, NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_3D_TOP, false, 0);
     v.vol[1] = v.vol[3] = 0;    /* behind the listener: the back pair, 0 dB */
+    v.hrtf = 5;
     start(&v);
     frames(4);
-    check(all(0, pcm(0.5f * k), 1) && all(1, pcm(0.5f * k), 1), "3D voice behind the listener: -3 dB on both sides");
+    check(all(0, pcm(0.5f * TAP_7F * k), 1) && all(1, pcm(0.5f * TAP_7F * k), 1),
+          "3D voice behind the listener: -3 dB on both sides");
     apu_down();
 
+    /* no HRTF entry: its HRTF sends silent */
     apu_up(false, true, 1);
     pcm_page(0, false, HALF, 0);
     pio(NV1BA0_PIO_SET_HRTF_SUBMIXES, DS_HRTF_SUBMIXES);
-    pio(NV1BA0_PIO_SET_HRTF_HEADROOM, 1);
-    pio(NV1BA0_PIO_SET_SUBMIX_HEADROOM + 4 * 6, 3);  /* not the 3D sends' */
     v = voice(7, NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_3D_TOP, false, 0);
     v.vol[0] = v.vol[2] = 0;
     start(&v);
     frames(4);
-    check(all(0, pcm(0.25f), 1) && all(1, pcm(0.25f), 1), "3D voice's HRTF sends at the HRTF headroom (/ 2)");
+    check(all(0, 0, 0) && all(1, 0, 0), "3D voice without an HRTF entry: its HRTF sends silent");
+    apu_down();
+
+    apu_up(false, true, 1);
+    pcm_page(0, false, HALF, 0);
+    pio(NV1BA0_PIO_SET_HRTF_SUBMIXES, DS_HRTF_SUBMIXES);
+    pio(NV1BA0_PIO_SET_HRTF_HEADROOM, 1);           /* no effect */
+    pio(NV1BA0_PIO_SET_SUBMIX_HEADROOM + 4 * 6, 3); /* 3D front left's: / 8 */
+    pio(NV1BA0_PIO_SET_CURRENT_HRTF_ENTRY, 5);
+    pio(NV1BA0_PIO_SET_HRIR, 0x7F | 0x7F << 8);
+    v = voice(7, NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_3D_TOP, false, 0);
+    v.vol[0] = v.vol[2] = 0;
+    v.hrtf = 5;
+    start(&v);
+    frames(4);
+    check(all(0, pcm(0.5f * TAP_7F / 8), 1) && all(1, pcm(0.5f * TAP_7F), 1),
+          "3D voice's HRTF sends at their bins' headroom, not the HRTF headroom");
     apu_down();
 }
 
@@ -392,17 +464,18 @@ static void test_full_dsp(void)
     pcm_page(0, false, HALF, 0);
     pio(NV1BA0_PIO_SET_HRTF_SUBMIXES, DS_HRTF_SUBMIXES);
     pio(NV1BA0_PIO_SET_CURRENT_HRTF_ENTRY, 5);
-    pio(NV1BA0_PIO_SET_HRIR, 127);              /* left tap 0 only */
+    pio(NV1BA0_PIO_SET_HRIR, 0x7F);             /* left tap 0 only */
     v = voice(7, NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_3D_TOP, false, 0);
     for (int b = 0; b < 4; b++) {
         v.vol[b] = 0;
     }
     v.hrtf = 5;
     start(&v);
-    frames(40);
+    frames(4);
     bins = true;
+    const float ear = 0.5f * TAP_7F;
     for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-        bins &= fabsf(g_mixbins[6][i] - 0.5f) < 1e-3f && fabsf(g_mixbins[8][i] - 0.5f) < 1e-3f &&
+        bins &= fabsf(g_mixbins[6][i] - ear) < 1e-3f && fabsf(g_mixbins[8][i] - ear) < 1e-3f &&
                 g_mixbins[7][i] == 0.0f && g_mixbins[9][i] == 0.0f;
     }
     check(bins, "full-DSP monitor: a mono 3D voice's left ear in the left 3D bins, its right ear in the right");
@@ -572,6 +645,7 @@ int main(int argc, char **argv)
     test_2d_downmix();
     test_2d_route_kept();
     test_2d_route_saved();
+    test_lfo_saved();
     test_3d();
     test_multipass();
     test_full_dsp();

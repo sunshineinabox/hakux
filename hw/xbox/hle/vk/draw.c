@@ -54,6 +54,7 @@ enum {
     RS_SHADOWFUNC = 156, RS_LINEWIDTH = 157,
     /* Fill modes and line/polygon smoothing from pb/kelvin.c. */
     RS_FILLMODE = 139, RS_BACKFILLMODE = 140, RS_EDGEANTIALIAS = 151,
+    RS_LOGICOP = 150,                   /* the GL op, 0 off (pb/kelvin.c) */
     /* polygon offset (ZBias writes these: slope -0.25 * bias, offset -bias) */
     RS_ZSLOPESCALE = 77, RS_ZOFFSET = 78, RS_POINTOFFSETENABLE = 79,
     RS_WIREFRAMEOFFSETENABLE = 80, RS_SOLIDOFFSETENABLE = 81,
@@ -2013,6 +2014,17 @@ static VkBlendFactor blend_factor(uint32_t f)
     }
 }
 
+/* GL and Vulkan list the 16 logic ops in the same order. */
+static uint8_t logic_op_key(uint32_t gl, bool supported)
+{
+    HLE_BUILD_BUG_ON(VK_LOGIC_OP_CLEAR != 0 || VK_LOGIC_OP_COPY != 3 || VK_LOGIC_OP_XOR != 6 ||
+                     VK_LOGIC_OP_INVERT != 10 || VK_LOGIC_OP_SET != 15);
+    if (!supported || gl < 0x1500 || gl > 0x150F) {
+        return 0;
+    }
+    return (uint8_t)(gl - 0x1500 + 1);
+}
+
 static VkBlendOp blend_op(uint32_t o)
 {
     switch (o) {
@@ -2111,6 +2123,8 @@ typedef struct PipeKey {
     /* Bits 0-1: polygon mode; bit 2: smooth lines.
      * Uses existing padding so cached key layout stays unchanged. */
     uint8_t raster;
+    /* VkLogicOp + 1 in existing key padding. Zero means off. */
+    uint8_t logic;
     /* Last, 8-aligned: on a device with dynamic vertex input the key ends
      * before it (g_key_bytes), its bytes, hash and record as they were */
     ViKey vi;
@@ -2347,7 +2361,8 @@ static bool key_supported(const PipeKey *k)
     const HleCaps *c = &g_hvk.caps;
     return ((k->raster & 3) == VK_POLYGON_MODE_FILL || c->fill_modes) &&
            (!(k->raster & 4) || c->smooth_lines) &&
-           (!(k->psh ? k->pk.poly_smooth : k->ps.poly_smooth) || c->bary);
+           (!(k->psh ? k->pk.poly_smooth : k->ps.poly_smooth) || c->bary) &&
+           (!k->logic || c->logic_op);
 }
 
 /* key's pipeline: GLSL from the key (and the vertex program's tokens),
@@ -2461,6 +2476,7 @@ static HlePbResult pipeline_build(const void *key, const uint32_t *tok, uint32_t
              * rasterization order */
             .flags = k->psh && k->pk.fblend ?
                      VK_PIPELINE_COLOR_BLEND_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_BIT_EXT : 0,
+            .logicOpEnable = k->logic != 0, .logicOp = k->logic ? (VkLogicOp)(k->logic - 1) : VK_LOGIC_OP_COPY,
             .attachmentCount = k->cfmt ? 1 : 0, .pAttachments = &ba };
         VkDynamicState dyn[] = {
             VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE,
@@ -2596,6 +2612,7 @@ static void pipe_async_init(void)
     HLE_BUILD_BUG_ON(offsetof(PipeKey, vi) !=
                      ((offsetof(PipeKey, pk) + sizeof(HlePshKey) + 7) & ~(size_t)7));
     HLE_BUILD_BUG_ON(offsetof(PipeKey, raster) >= offsetof(PipeKey, vi));
+    HLE_BUILD_BUG_ON(offsetof(PipeKey, logic) >= offsetof(PipeKey, vi));
     /* up to ds: the key as it was before ds */
     HLE_BUILD_BUG_ON(offsetof(PipeKey, ds) != offsetof(PipeKey, vi) + sizeof(ViKey));
     const HleCaps *c = &g_hvk.caps;
@@ -4331,7 +4348,16 @@ static void draw_faces(const HleCmdDraw *c, VkCommandBuffer cb, uint32_t rt_id, 
         k.ps.out_bgra = rt && hle_surf_out_bgra(rt->fmt);
         k.ps.poly_smooth = psmooth && g_hvk.caps.bary;
     }
-    k.blend_en = s->rs[RS_ALPHABLENDENABLE] != 0 &&
+    /* A logic op replaces fixed-function and shader blending. */
+    k.logic = logic_op_key(s->rs[RS_LOGICOP], g_hvk.caps.logic_op);
+    if (s->rs[RS_LOGICOP]) {
+        static unsigned s_logged;
+        if (s_logged++ < 4) {
+            hle_log("hakuX-hle-back", "logic op %x%s", s->rs[RS_LOGICOP],
+                    k.logic ? "" : ": not applied (no logicOp on this device, or not an op)");
+        }
+    }
+    k.blend_en = s->rs[RS_ALPHABLENDENABLE] != 0 && !k.logic &&
                  !(s->psh && k.pk.debug == 17 && (k.pk.shadow & 15));  /* debug view 17 */
     k.src = s->rs[RS_SRCBLEND];
     k.dst = s->rs[RS_DESTBLEND];
@@ -4772,11 +4798,11 @@ static void draw_faces(const HleCmdDraw *c, VkCommandBuffer cb, uint32_t rt_id, 
         /* debug (debug.hakux.psframe): a fixed-function draw's raster state */
         hle_log("hakuX-hle-pipe", "ff draw n=%u prim=%u fvf=%x rt=%u %ux%u ds=%u sc=%d,%d %ux%u "
                 "vp=%g,%g scr=%g,%g,%g,%g cull=%x ff=%x zt=%d zw=%u zf=%x stn=%d "
-                "wmask=%x blend=%u atest=%u st0 tex=%u op=%u akill=%u",
+                "wmask=%x blend=%u logic=%u atest=%u st0 tex=%u op=%u akill=%u",
                 c->count, c->prim, c->fvf, rt_id, tw, th, ds_id, sc.offset.x, sc.offset.y,
                 sc.extent.width, sc.extent.height, pc.vp[0], pc.vp[1],
                 pc.scr[0], pc.scr[1], pc.scr[2], pc.scr[3], cull, ff, zt,
-                s->rs[RS_ZWRITEENABLE], s->rs[RS_ZFUNC], stn, k.wmask, k.blend_en,
+                s->rs[RS_ZWRITEENABLE], s->rs[RS_ZFUNC], stn, k.wmask, k.blend_en, k.logic,
                 k.ps.alpha_test, c->tex[0], s->tss[0][TSS_COLOROP], s->tss[0][TSS_ALPHAKILL]);
     }
     uint32_t bc = s->rs[RS_BLENDCOLOR];

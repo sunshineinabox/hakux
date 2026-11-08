@@ -44,7 +44,7 @@ ApuConfig g_apu_config = {
     .hrtf = true,
     .volume_limit = 1.0f,
     .num_workers = 0,
-    .resampler = VP_RESAMPLE_SINC,      /* linear where the build isn't AArch64 (vp/resample_sinc.h) */
+    .resampler = VP_RESAMPLE_HARDWARE,  /* the Xbox's own interpolation (vp/resample.h) */
     .use_dsp_jit = true,
 };
 
@@ -672,13 +672,13 @@ static void *mcpx_apu_frame_thread(void *arg)
  * EP frames to completion, NC_APU_HRTF=0 turns the 3D voices' filters off,
  * NC_APU_WORKERS=n sets the voice workers (0: by the CPU count),
  * NC_APU_TRAP_PARK=1 stops the frames while the FE is trapped, as they did
- * before (an A/B switch), NC_APU_RESAMPLER=linear|sinc overrides the
+ * before (an A/B switch), NC_APU_RESAMPLER=hardware|sinc|linear overrides the
  * resampler the core option chose (nc_dev_apu_set_resampler). */
 static void config_init(void)
 {
-    const char *rs = getenv("NC_APU_RESAMPLER");
-    if (rs && (!strcmp(rs, "sinc") || !strcmp(rs, "linear"))) {
-        g_apu_config.resampler = !strcmp(rs, "sinc") ? VP_RESAMPLE_SINC : VP_RESAMPLE_LINEAR;
+    const int rs = vp_resample_quality_named(getenv("NC_APU_RESAMPLER"));
+    if (rs >= 0) {
+        g_apu_config.resampler = rs;
     }
     g_apu_config.use_dsp = getenv_int_clamped("NC_APU_DSP", 0, 1, g_apu_config.use_dsp);
     g_apu_config.use_dsp_jit = getenv_int_clamped("NC_APU_DSP_JIT", 0, 1, true);
@@ -735,9 +735,10 @@ static void *apu_trace_thread(void *arg)
     return NULL;
 }
 
-void nc_dev_apu_set_resampler(bool sinc)
+void nc_dev_apu_set_resampler(const char *name)
 {
-    g_apu_config.resampler = sinc ? VP_RESAMPLE_SINC : VP_RESAMPLE_LINEAR;
+    const int quality = vp_resample_quality_named(name);
+    g_apu_config.resampler = quality >= 0 ? quality : VP_RESAMPLE_HARDWARE;
 }
 
 void nc_dev_apu_set_dsp(bool enabled)

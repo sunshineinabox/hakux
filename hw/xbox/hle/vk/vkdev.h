@@ -109,6 +109,7 @@ typedef struct HleCaps {
                                    times the resolution scale (vk/draw.c), else 1.0
                                    (Turnip on the Adreno 650 has none) */
     bool fill_modes;            /* Non-solid polygon modes. */
+    bool logic_op;              /* logicOp: SET_LOGIC_OP (vk/draw.c) */
     bool smooth_lines;          /* Vulkan smooth-line rasterization. */
     bool bary;                  /* Barycentric coordinates for polygon smoothing. */
     bool cache_control;         /* pipelineCreationCacheControl: a pipeline asked of the
