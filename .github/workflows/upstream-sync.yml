@@ -1,0 +1,102 @@
+name: Upstream sync
+
+# Once a day, rebase retroforge-standalone onto the latest portare-ch/hakuX-lr
+# release. If it applies and passes linux-ci.sh it gets pushed, otherwise an
+# issue is opened. Tagging a release is still done by hand.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream tag (default is the latest release)
+        required: false
+      dry_run:
+        description: Don't push or open an issue
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency: upstream-sync
+
+env:
+  UPSTREAM: portare-ch/hakuX-lr
+  BRANCH: retroforge-standalone
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+          # GITHUB_TOKEN can't push commits that change workflow files
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Find the upstream release
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [ -z "$TAG" ]; then
+            TAG=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          fi
+          if ! echo "$TAG" | grep -Eq '^linux-v[0-9][0-9A-Za-z.-]*$'; then
+            echo "::error::unexpected tag: $TAG"
+            exit 1
+          fi
+          git fetch --no-tags "https://github.com/$UPSTREAM.git" "refs/tags/$TAG:refs/tags/$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "old=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # leave a release alone while its issue is open
+          if [ "${{ github.event_name }}" = schedule ] &&
+             [ -n "$(gh issue list --label upstream-sync --search "$TAG in:title" --json number --jq '.[].number')" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase
+        id: rebase
+        if: steps.target.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          git config user.name github-actions
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          python3 .github/upstream-sync/sync.py "$TAG" "$RUNNER_TEMP/report.md" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        if: steps.rebase.outputs.result == 'clean'
+        with:
+          path: build/deps
+          key: linux-deps-${{ hashFiles('tools/native/linux-deps.json') }}
+
+      # same as the build job in linux.yml
+      - name: Build and test
+        id: build
+        if: steps.rebase.outputs.result == 'clean'
+        continue-on-error: true
+        run: |
+          docker build --tag hakux-linux --file tools/native/Dockerfile.linux tools/native
+          docker run --rm --volume "$PWD:/src" --workdir /src \
+            --env JOBS=4 --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory --env GIT_CONFIG_VALUE_0='*' \
+            hakux-linux sh tools/native/linux-ci.sh "ci-$(git rev-parse --short=10 HEAD)"
+
+      - name: Push or open an issue
+        if: steps.target.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.target.outputs.tag }}
+          OLD: ${{ steps.target.outputs.old }}
+          RESULT: ${{ steps.rebase.outputs.result }}
+          BUILD: ${{ steps.build.outcome }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: sh .github/upstream-sync/publish.sh
