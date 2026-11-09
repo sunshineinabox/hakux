@@ -4,63 +4,25 @@
     python3 sync.py <tag> <report.md>
 
 CHANGELOG.md conflicts are settled here: upstream's file with our
-"## linux-v<version>-rf.<n>" section on top. Every other conflict hunk goes to
-a GitHub Models chat model (SYNC_MODELS, comma-separated, the first that
-answers; GITHUB_TOKEN with models: read). Either way our section is renamed
-for the tag (rf.1): the release job wants a section named after the tag.
+"## linux-v<version>-rf.<n>" section on top. Either way our section is renamed
+for the tag (rf.1): the release job wants a section named after the tag. Any
+other conflict stops the rebase (aborted, HEAD as it was) and the report
+shows its hunks.
 
-Prints result=current|clean|resolved|failed for $GITHUB_OUTPUT ("resolved":
-a model settled something); the report is Markdown for an issue or the run's
-summary. A failed rebase is aborted, HEAD as it was.
+Prints result=current|clean|failed for $GITHUB_OUTPUT; the report is Markdown
+for an issue or the run's summary.
 """
-import difflib
-import json
 import os
 import re
 import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
-MODELS = [m.strip() for m in os.environ.get('SYNC_MODELS', '').split(',') if m.strip()] \
-    or ['openai/gpt-4.1', 'openai/gpt-4o']
-ENDPOINT = 'https://models.github.ai/inference/chat/completions'
-MAX_PROMPT = 24000          # characters: the free tier takes about 8000 tokens a request
 MAX_COMMITS = 10            # more to replay: HEAD's base isn't in the tag's history
+MAX_SHOWN = 6000            # characters of conflict hunks shown per file
 
 OUR_HEADING = re.compile(r'^## linux-v(\d+(?:\.\d+)+)-rf\.(\d+)\b[^\n]*\n', re.M)
-HUNK = re.compile(r'^<<<<<<< [^\n]*\n(.*?)^\|\|\|\|\|\|\| [^\n]*\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]*\n',
-                  re.M | re.S)
-MARKERS = re.compile(r'^(<<<<<<<|\|\|\|\|\|\|\||>>>>>>>)( |$)', re.M)
-REPLY = re.compile(r'<<<MERGED\n(.*?)\n?MERGED>>>', re.S)
-
-SYSTEM = """You resolve git rebase conflicts for a fork of an Xbox emulator, \
-portare-ch/hakuX-lr. The fork's commits add RetroForge's changes on top of upstream.
-
-In each conflict, UPSTREAM is upstream's new text, BASE is the text both sides \
-started from, and OURS is the fork commit's version of BASE. Write the text \
-that keeps every upstream change and applies the fork commit's change (the \
-difference between BASE and OURS) on top of it, in upstream's style.
-
-Reply with the merged text only, between a line <<<MERGED and a line MERGED>>>. \
-No conflict markers, no commentary. If the changes can't be combined safely, \
-reply with the single word UNRESOLVABLE."""
-
-PROMPT = """File: {path}
-Fork commit: {message}
-
-Lines before the conflict:
-{before}
-UPSTREAM:
-{up}
-BASE:
-{base}
-OURS:
-{ours}
-Lines after the conflict:
-{after}"""
+HUNK = re.compile(r'^<<<<<<< [^\n]*\n.*?^>>>>>>> [^\n]*\n', re.M | re.S)
 
 os.environ['GIT_EDITOR'] = 'true'
 
@@ -138,79 +100,18 @@ def retarget_changelog(tag, version):
     return True
 
 
-def ask(prompt):
-    errors = []
-    for model in MODELS:
-        body = json.dumps({'model': model, 'temperature': 0, 'max_tokens': 4000,
-                           'messages': [{'role': 'system', 'content': SYSTEM},
-                                        {'role': 'user', 'content': prompt}]}).encode()
-        for attempt in range(3):
-            req = urllib.request.Request(ENDPOINT, body, {
-                'Authorization': f'Bearer {os.environ.get("GITHUB_TOKEN", "")}',
-                'Accept': 'application/vnd.github+json',
-                'X-GitHub-Api-Version': '2022-11-28',
-                'Content-Type': 'application/json'})
-            try:
-                with urllib.request.urlopen(req, timeout=180) as r:
-                    raw = r.read()
-                    try:
-                        return model, json.loads(raw)['choices'][0]['message']['content']
-                    except ValueError:
-                        errors.append(f'{model}: HTTP {r.status} from {r.geturl()}, '
-                                      f'{r.headers.get("content-type")}, not JSON: {raw[:200]!r}')
-                        break
-            except urllib.error.HTTPError as e:
-                detail = e.read().decode(errors='replace')[:300]
-                if e.code == 429 and attempt < 2:
-                    time.sleep(min(int(e.headers.get('retry-after') or 30), 90))
-                    continue
-                errors.append(f'{model}: HTTP {e.code} {detail}')
-            except (OSError, KeyError, IndexError, ValueError) as e:
-                errors.append(f'{model}: {e}')
-            break
-    raise Failed('no model answered: ' + '; '.join(errors))
-
-
-def fence(text):
-    return '```\n' + text + ('' if text.endswith('\n') or not text else '\n') + '```\n'
-
-
-def settle_with_model(path, message, report):
+def hunks(path):
+    """The file's conflict hunks for the report (HEAD is upstream's side, the other ours)."""
     try:
-        text = Path(path).read_text()
-    except (OSError, UnicodeDecodeError) as e:
-        raise Failed(f'`{path}`: not a text file with conflict markers ({e})')
-    out, pos, hunks = [], 0, 0
-    for m in HUNK.finditer(text):
-        up, base, ours = m.groups()
-        prompt = PROMPT.format(path=path, message=message.strip(),
-                               before=fence('\n'.join(text[:m.start()].splitlines()[-20:])),
-                               after=fence('\n'.join(text[m.end():].splitlines()[:20])),
-                               up=fence(up), base=fence(base), ours=fence(ours))
-        if len(prompt) > MAX_PROMPT:
-            raise Failed(f'`{path}`: a conflict too big for the free tier ({len(prompt)} characters)')
-        model, reply = ask(prompt)
-        got = REPLY.search(reply)
-        if not got or reply.strip() == 'UNRESOLVABLE':
-            raise Failed(f'`{path}`: {model} could not merge a hunk')
-        merged = got.group(1)
-        if merged and not merged.endswith('\n'):
-            merged += '\n'
-        if MARKERS.search(merged):
-            raise Failed(f'`{path}`: {model} left conflict markers')
-        diff = ''.join(difflib.unified_diff(up.splitlines(True), merged.splitlines(True),
-                                            'upstream', f'merged by {model}'))
-        shown = diff or "(upstream's text, unchanged)\n"
-        report.append(f"`{path}`, hunk {hunks + 1} ({model}), against upstream's side:\n\n"
-                      f'```diff\n{shown}```\n')
-        out += [text[pos:m.start()], merged]
-        pos, hunks = m.end(), hunks + 1
-    if not hunks:
-        raise Failed(f'`{path}`: no conflict hunks to merge (deleted on one side, or binary)')
-    merged = ''.join(out) + text[pos:]
-    if MARKERS.search(merged):
-        raise Failed(f'`{path}`: conflict markers left after merging')
-    Path(path).write_text(merged)
+        found = HUNK.findall(Path(path).read_text())
+    except (OSError, UnicodeDecodeError):
+        return f'`{path}`: no text to show (deleted on one side, or binary).\n'
+    if not found:
+        return f'`{path}`: no conflict markers (deleted or renamed on one side).\n'
+    shown = ''.join(found)
+    if len(shown) > MAX_SHOWN:
+        shown = shown[:MAX_SHOWN] + '\n[... cut]\n'
+    return f'`{path}`, {len(found)} hunk(s):\n\n````diff\n{shown}````\n'
 
 
 def main():
@@ -226,7 +127,6 @@ def main():
         if len(commits) > MAX_COMMITS:
             raise Failed(f"{len(commits)} commits to replay: is HEAD's base in {tag}'s history?")
         report.append('Our commits: ' + ', '.join(f'`{c}`' for c in commits) + '.\n')
-        used_model = False
         r = git('-c', 'merge.conflictStyle=diff3', 'rebase', tag, check=False)
         while rebasing():
             files = git('diff', '--name-only', '--diff-filter=U').stdout.split()
@@ -237,20 +137,22 @@ def main():
                     raise Failed(f'the rebase stopped at `{current}`: {(r.stderr or r.stdout).strip()[-600:]}')
                 continue
             report.append(f'Conflicts applying `{current}`: ' + ', '.join(f'`{f}`' for f in files) + '.\n')
-            message = git('log', '-1', '--format=%B', 'REBASE_HEAD').stdout
+            left = []
             for f in files:
                 if f == 'CHANGELOG.md' and settle_changelog(version):
                     report.append("`CHANGELOG.md`: upstream's file, our section on top, named for the tag.\n")
+                    git('add', '--', f)
                 else:
-                    settle_with_model(f, message, report)
-                    used_model = True
-                git('add', '--', f)
+                    report.append(hunks(f))
+                    left.append(f)
+            if left:
+                raise Failed(', '.join(f'`{f}`' for f in left) + (' needs' if len(left) == 1 else ' need') + f' a hand (`{current}`)')
             r = git('rebase', '--continue', check=False)
         if r.returncode and not rebasing():
             raise Failed(f'the rebase failed: {(r.stderr or r.stdout).strip()[-600:]}')
         if retarget_changelog(tag, version):
             report.append('`CHANGELOG.md`: our section renamed for the tag.\n')
-        result = 'resolved' if used_model else 'clean'
+        result = 'clean'
     except Exception as e:      # Failed, or a bug here: the issue says which
         report.append(f'**Stopped:** {e if isinstance(e, Failed) else repr(e)}\n')
         if rebasing():

@@ -1,8 +1,8 @@
 #!/bin/sh
 # RetroForge: after sync.py and the build (upstream-sync.yml's env). A clean,
-# passing rebase goes to $BRANCH. A model's merge, or a rebase that fails to
-# build, goes to sync/<tag> with an issue to review it; conflicts left over
-# open an issue. One open issue per tag: later runs comment on it.
+# passing rebase goes to $BRANCH. One that fails to build goes to sync/<tag>
+# with an issue; a conflict sync.py can't settle opens an issue. One open issue
+# per tag: later runs comment on it.
 set -eu
 
 report=$RUNNER_TEMP/report.md
@@ -16,12 +16,10 @@ case "$RESULT/$BUILD" in
         echo "\`$BRANCH\` already has $upstream_link." >> "$GITHUB_STEP_SUMMARY"
         exit 0 ;;
     clean/success) state=push ;;
-    resolved/success) state=review
-        title="Upstream sync to $TAG: a model settled the conflicts, review it" ;;
-    clean/* | resolved/*) state=broken
+    clean/*) state=broken
         title="Upstream sync to $TAG: the rebase doesn't build or pass its tests" ;;
     *) state=conflict
-        title="Upstream sync to $TAG: conflicts it couldn't settle" ;;
+        title="Upstream sync to $TAG: conflicts to fix" ;;
 esac
 
 if [ "$state" = push ]; then
@@ -47,11 +45,10 @@ git bundle create "$RUNNER_TEMP/sync.bundle" "$TAG..HEAD" 2>/dev/null || true
     echo "Rebasing \`$BRANCH\` onto upstream's $upstream_link ([run]($RUN_URL))."
     echo
     case "$state" in
-        review) echo "The rebase needed a model's merge (below). It builds and passes \`linux-ci.sh\`." ;;
         broken) echo "The rebase went through, but the build or its tests failed: see the run's log." ;;
-        pushfail) echo "Nothing needed a model, and it builds and passes \`linux-ci.sh\`, but the push to \`$BRANCH\` was refused." \
+        pushfail) echo "The rebase builds and passes \`linux-ci.sh\`, but the push to \`$BRANCH\` was refused." \
             "A push that rewrites workflow files needs a \`SYNC_TOKEN\` secret (fine-grained, this repository, Contents and Workflows read and write)." ;;
-        conflict) echo "Nothing was pushed." ;;
+        conflict) echo "Nothing was pushed: fix the conflicts below on \`$BRANCH\` (rebase it onto \`$TAG\`), then close this." ;;
     esac
     echo
     if [ "$pushed" = true ]; then
@@ -83,5 +80,5 @@ else
     gh issue create --title "$title" --label upstream-sync --body-file "$body"
 fi
 cat "$body" >> "$GITHUB_STEP_SUMMARY"
-# a red run too (GitHub's email), unless it only waits for a review
-[ "$state" = review ]
+# a red run too: GitHub's email
+exit 1

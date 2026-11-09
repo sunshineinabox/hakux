@@ -1,9 +1,9 @@
 # RetroForge: keeps retroforge-standalone on upstream hakuX-lr's latest release.
 # Every 6 hours: rebase our commits onto portare-ch/hakuX-lr's newest linux-v
-# release (.github/upstream-sync/sync.py, a GitHub Models model for conflicts
-# beyond CHANGELOG.md), build and test it as linux.yml does, then push it
-# (publish.sh). A model's merge or a failing build goes to sync/<tag> with an
-# issue; conflicts left over open an issue. Nothing is tagged or released.
+# release (.github/upstream-sync/sync.py, which settles CHANGELOG.md
+# conflicts), build and test it as linux.yml does, then push it (publish.sh).
+# Any other conflict opens an issue with its hunks; a failing build goes to
+# sync/<tag> with an issue. Nothing is tagged or released.
 #
 # github.token can't push commits that change workflow files: a SYNC_TOKEN
 # secret (fine-grained, this repository, Contents and Workflows read and write)
@@ -31,7 +31,6 @@ on:
 permissions:
   contents: write
   issues: write
-  models: read
 
 concurrency:
   group: upstream-sync
@@ -85,15 +84,13 @@ jobs:
         if: steps.target.outputs.skip != 'true'
         env:
           TAG: ${{ steps.target.outputs.tag }}
-          GITHUB_TOKEN: ${{ github.token }}
-          SYNC_MODELS: ${{ vars.SYNC_MODELS }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           python3 "$RUNNER_TEMP/upstream-sync/sync.py" "$TAG" "$RUNNER_TEMP/report.md" | tee -a "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v4
-        if: steps.rebase.outputs.result == 'clean' || steps.rebase.outputs.result == 'resolved'
+        if: steps.rebase.outputs.result == 'clean'
         with:
           path: build/deps
           key: linux-deps-${{ hashFiles('tools/native/linux-deps.json') }}
@@ -101,7 +98,7 @@ jobs:
       # linux.yml's build job
       - name: Build and check
         id: build
-        if: steps.rebase.outputs.result == 'clean' || steps.rebase.outputs.result == 'resolved'
+        if: steps.rebase.outputs.result == 'clean'
         continue-on-error: true
         run: |
           docker build --tag hakux-linux --file tools/native/Dockerfile.linux tools/native
