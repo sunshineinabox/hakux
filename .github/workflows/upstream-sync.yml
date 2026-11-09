@@ -1,0 +1,132 @@
+# RetroForge: keeps retroforge-standalone on upstream hakuX-lr's latest release.
+# Every 6 hours: rebase our commits onto portare-ch/hakuX-lr's newest linux-v
+# release (.github/upstream-sync/sync.py, a GitHub Models model for conflicts
+# beyond CHANGELOG.md), build and test it as linux.yml does, then push it
+# (publish.sh). A model's merge or a failing build goes to sync/<tag> with an
+# issue; conflicts left over open an issue. Nothing is tagged or released.
+#
+# github.token can't push commits that change workflow files: a SYNC_TOKEN
+# secret (fine-grained, this repository, Contents and Workflows read and write)
+# lets those through; without it such a push opens an issue instead.
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream tag to rebase onto (empty for upstream's latest release)
+        required: false
+        default: ''
+      from:
+        description: The commits to move (a branch or tag)
+        required: false
+        default: retroforge-standalone
+      dry_run:
+        description: No pushes and no issue; the report goes to the run's summary
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+  models: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: portare-ch/hakuX-lr
+  BRANCH: retroforge-standalone
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Target
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          FROM: ${{ inputs.from || 'retroforge-standalone' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          [ -n "$TAG" ] || TAG=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          if ! printf '%s\n' "$TAG" | grep -Eq '^linux-v[0-9][0-9A-Za-z.-]*$'; then
+            echo "::error::not an upstream linux-v tag: $TAG"
+            exit 1
+          fi
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch --no-tags upstream "refs/tags/$TAG:refs/tags/$TAG"
+          # the scripts as this branch has them, whatever the rebase does to the tree
+          cp -R .github/upstream-sync "$RUNNER_TEMP/upstream-sync"
+          from=$(git rev-parse --verify -q "origin/$FROM^{commit}" || git rev-parse --verify "$FROM^{commit}")
+          git checkout -q --detach "$from"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "old=$(git rev-parse "origin/$BRANCH")" >> "$GITHUB_OUTPUT"
+          # A scheduled run leaves a tag alone while its issue is open.
+          open=$(gh issue list --state open --label upstream-sync --search "$TAG in:title" --json number --jq length 2> /dev/null || echo 0)
+          if [ "$EVENT" = schedule ] && [ "$open" != 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "$TAG has an open upstream-sync issue: nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Rebase
+        id: rebase
+        if: steps.target.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SYNC_MODELS: ${{ vars.SYNC_MODELS }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 "$RUNNER_TEMP/upstream-sync/sync.py" "$TAG" "$RUNNER_TEMP/report.md" | tee -a "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        if: steps.rebase.outputs.result == 'clean' || steps.rebase.outputs.result == 'resolved'
+        with:
+          path: build/deps
+          key: linux-deps-${{ hashFiles('tools/native/linux-deps.json') }}
+
+      # linux.yml's build job
+      - name: Build and check
+        id: build
+        if: steps.rebase.outputs.result == 'clean' || steps.rebase.outputs.result == 'resolved'
+        continue-on-error: true
+        run: |
+          docker build --tag hakux-linux --file tools/native/Dockerfile.linux tools/native
+          docker run --rm --volume "$PWD:/src" --workdir /src \
+            --env JOBS=4 --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory --env GIT_CONFIG_VALUE_0='*' \
+            hakux-linux sh tools/native/linux-ci.sh "ci-$(git rev-parse --short=10 HEAD)"
+
+      - name: Publish
+        if: steps.target.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.target.outputs.tag }}
+          OLD: ${{ steps.target.outputs.old }}
+          RESULT: ${{ steps.rebase.outputs.result }}
+          BUILD: ${{ steps.build.outcome }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: sh "$RUNNER_TEMP/upstream-sync/publish.sh"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-sync
+          path: |
+            ${{ runner.temp }}/sync.bundle
+            ${{ runner.temp }}/report.md
+          if-no-files-found: ignore
